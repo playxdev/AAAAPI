@@ -65,10 +65,11 @@ func (h *AuthHandler) AdminLogin(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(model.AdminLoginResponse{
-		Token:    signedToken,
-		AdminID:  admin.AdminID,
-		FullName: admin.AdminName,
-		Role:     admin.AdminLevel,
+		Token:     signedToken,
+		AdminID:   admin.AdminID,
+		FullName:  admin.AdminName,
+		Role:      admin.AdminLevel,
+		ProjectID: admin.ProjectID,
 	})
 }
 

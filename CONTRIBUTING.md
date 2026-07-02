@@ -85,7 +85,20 @@ Log entries are inserted within a single database transaction — any failure ro
 
 ### Business ID Generation
 
-IDs use the format `{PREFIX}-YYYYMMDDHHmmss` (e.g., `PRJ-20260628120000`). Prefixes:
+Business IDs are **generated exclusively by database triggers** (`INSTEAD OF INSERT`). Application code must NOT generate IDs.
+
+**Format:** `{PREFIX}-YYYYMMDD-XXXXXX` where `XXXXXX` = 6 random hex characters from `NEWID()`.
+
+**Application pattern:**
+```go
+var generatedID string
+err := h.db.QueryRow(`
+    INSERT INTO tb_foo (prefix, foo_id, ...)
+    OUTPUT INSERTED.foo_id
+    VALUES (@p1, @p2, ...)`,
+    "FOO", "", // pass empty string for ID — trigger generates it
+).Scan(&generatedID)
+```
 
 | Prefix | Table / Entity |
 |------- |--------------- |
@@ -98,7 +111,7 @@ IDs use the format `{PREFIX}-YYYYMMDDHHmmss` (e.g., `PRJ-20260628120000`). Prefi
 | `BLK`  | Blacklist      |
 | `ADM`  | Admin          |
 
-Edge-pushed log IDs append a sequence counter: `ACL-YYYYMMDDHHmmss-0`, `ACL-YYYYMMDDHHmmss-1`, etc.
+IDs are unguessable (16.7M possibilities per day) and generated server-side by the database.
 
 ## Code Style
 

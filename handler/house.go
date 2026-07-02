@@ -2,8 +2,6 @@ package handler
 
 import (
 	"aaaapi/model"
-	"fmt"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jmoiron/sqlx"
@@ -48,22 +46,23 @@ func (h *HouseHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(model.ErrorResponse{Error: err.Error()})
 	}
-	body.HouseID = fmt.Sprintf("HSE-%s", time.Now().Format("20060102150405"))
 	body.Prefix = "HSE"
 	body.UpdateBy = "System"
 	body.IsActive = true
 	body.IDStatus = "ACTIVE"
 
-	_, err := h.db.Exec(`
+	var generatedID string
+	err := h.db.QueryRow(`
 		INSERT INTO tb_house (prefix, house_id, project_id, house_number, zone_or_soi, update_by, is_active, id_status)
+		OUTPUT INSERTED.house_id
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8)`,
-		body.Prefix, body.HouseID, body.ProjectID, body.HouseNumber, body.ZoneOrSoi, body.UpdateBy, body.IsActive, body.IDStatus,
-	)
+		body.Prefix, "", body.ProjectID, body.HouseNumber, body.ZoneOrSoi, body.UpdateBy, body.IsActive, body.IDStatus,
+	).Scan(&generatedID)
 	if err != nil {
 		return c.Status(500).JSON(model.ErrorResponse{Error: err.Error()})
 	}
 
-	h.db.Get(&body, "SELECT * FROM tb_house WHERE house_id = @p1", body.HouseID)
+	h.db.Get(&body, "SELECT * FROM tb_house WHERE house_id = @p1", generatedID)
 	return c.Status(201).JSON(model.SuccessResponse{Message: "created", Data: body})
 }
 

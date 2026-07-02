@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.2.0 (2026-07-03)
+
+### Changed
+
+- **Business ID generation moved to database triggers** — application no longer generates IDs.
+  - ID format changed from `{PREFIX}-YYYYMMDDHHmmss` to `{PREFIX}-YYYYMMDD-XXXXXX` (date + 6 random hex chars).
+  - All `Create()` handlers use `OUTPUT INSERTED.{id}` to capture DB-generated IDs.
+  - Edge push logs no longer append sequence counters; trigger handles each `log_id`.
+- `AdminLoginResponse` now includes `project_id` field so the frontend can filter data by admin's assigned project.
+- Removed `"time"` and `"fmt"` imports from handlers that no longer generate IDs locally.
+
+### Upstream
+
+- Requires `AAASQL/docs/AAA.sql` v1.2.0+ (new `INSTEAD OF INSERT` triggers).
+
+---
+
 ## v1.1.0 (2026-06-28)
 
 ### Added

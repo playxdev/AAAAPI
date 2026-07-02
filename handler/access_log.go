@@ -65,7 +65,6 @@ func (h *AccessLogHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(model.ErrorResponse{Error: err.Error()})
 	}
-	body.LogID = fmt.Sprintf("ACL-%s", time.Now().Format("20060102150405"))
 	body.Prefix = "ACL"
 	body.UpdateBy = "System"
 	body.IsActive = true
@@ -75,17 +74,19 @@ func (h *AccessLogHandler) Create(c *fiber.Ctx) error {
 		body.AccessDate = time.Now()
 	}
 
-	_, err := h.db.Exec(`
+	var generatedID string
+	err := h.db.QueryRow(`
 		INSERT INTO tb_access_log (prefix, log_id, project_id, device_id, license_plate, access_type, user_type, access_date, image_url, remark, is_success, update_by, is_active, id_status)
+		OUTPUT INSERTED.log_id
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14)`,
-		body.Prefix, body.LogID, body.ProjectID, body.DeviceID, body.LicensePlate,
+		body.Prefix, "", body.ProjectID, body.DeviceID, body.LicensePlate,
 		body.AccessType, body.UserType, body.AccessDate, body.ImageURL, body.Remark,
 		body.IsSuccess, body.UpdateBy, body.IsActive, body.IDStatus,
-	)
+	).Scan(&generatedID)
 	if err != nil {
 		return c.Status(500).JSON(model.ErrorResponse{Error: err.Error()})
 	}
 
-	h.db.Get(&body, "SELECT * FROM tb_access_log WHERE log_id = @p1", body.LogID)
+	h.db.Get(&body, "SELECT * FROM tb_access_log WHERE log_id = @p1", generatedID)
 	return c.Status(201).JSON(model.SuccessResponse{Message: "created", Data: body})
 }

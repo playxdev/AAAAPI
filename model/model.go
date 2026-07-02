@@ -175,10 +175,11 @@ type AdminLoginRequest struct {
 }
 
 type AdminLoginResponse struct {
-	Token    string `json:"token"`
-	AdminID  string `json:"admin_id"`
-	FullName string `json:"full_name"`
-	Role     string `json:"role"`
+	Token     string `json:"token"`
+	AdminID   string `json:"admin_id"`
+	FullName  string `json:"full_name"`
+	Role      string `json:"role"`
+	ProjectID string `json:"project_id"`
 }
 
 type ErrorResponse struct {

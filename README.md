@@ -75,7 +75,7 @@ Admin accounts live in `tb_admin` with bcrypt-hashed passwords. Admin users log 
 
 ```sql
 INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password, admin_level)
-VALUES ('admin', 'PRJ0001', 'admin', '<bcrypt-hash>', 'ADMIN');
+VALUES ('', 'PRJ-20260628-a1b2c3', 'admin', '<bcrypt-hash>', 'ADMIN');
 ```
 
 Generate the bcrypt hash with:
@@ -127,9 +127,10 @@ Response (200):
 ```json
 {
   "token": "eyJhbGciOiJIUzI1NiIs...",
-  "admin_id": "ADM00001",
+  "admin_id": "ADM-20260628-a1b2c3",
   "full_name": "admin",
-  "role": "ADMIN"
+  "role": "ADMIN",
+  "project_id": "PRJ-20260628-d4e5f6"
 }
 ```
 Invalid credentials return `401 {"error":"invalid credentials"}`.
@@ -363,7 +364,7 @@ All handlers and middleware have unit tests using `sqlmock` for database isolati
 
 ## Database
 
-See [`AAASQL/docs/AAA.sql`](../AAASQL/docs/AAA.sql) for the full schema (8 tables, v1.2.0). All tables use soft-delete (`is_active`, `is_delete`) with auto-update triggers on `update_date`. Admin accounts use bcrypt password hashing in `tb_admin`.
+See [`AAASQL/docs/AAA.sql`](../AAASQL/docs/AAA.sql) for the full schema (8 tables, v1.2.0). All tables use soft-delete (`is_active`, `is_delete`) with `AFTER UPDATE` triggers on `update_date` and `INSTEAD OF INSERT` triggers for auto-generating business IDs (format: `PREFIX-YYYYMMDD-XXXXXX`). Admin accounts use bcrypt password hashing in `tb_admin`.
 
 ## License
 

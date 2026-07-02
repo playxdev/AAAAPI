@@ -148,7 +148,6 @@ func (h *EdgeHandler) PushLogs(c *fiber.Ctx) error {
 	defer tx.Rollback()
 
 	for _, entry := range req.Logs {
-		logID := fmt.Sprintf("ACL-%s-%d", now.Format("20060102150405"), count)
 		accessDate := entry.AccessDate
 		if accessDate.IsZero() {
 			accessDate = now
@@ -157,7 +156,7 @@ func (h *EdgeHandler) PushLogs(c *fiber.Ctx) error {
 		_, err := tx.Exec(`
 			INSERT INTO tb_access_log (prefix, log_id, project_id, device_id, license_plate, access_type, user_type, access_date, image_url, remark, is_success, update_by, is_active, id_status)
 			VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14)`,
-			"ACL", logID, req.ProjectID, req.DeviceID, entry.LicensePlate,
+			"ACL", "", req.ProjectID, req.DeviceID, entry.LicensePlate,
 			entry.AccessType, entry.UserType, accessDate, entry.ImageURL, entry.Remark,
 			entry.IsSuccess, "Edge", true, "SUCCESS",
 		)

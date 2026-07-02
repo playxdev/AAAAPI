@@ -3,7 +3,6 @@ package handler
 import (
 	"aaaapi/model"
 	"fmt"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jmoiron/sqlx"
@@ -55,7 +54,6 @@ func (h *UserHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(model.ErrorResponse{Error: err.Error()})
 	}
-	body.UserID = fmt.Sprintf("USR-%s", time.Now().Format("20060102150405"))
 	body.Prefix = "USR"
 	body.UpdateBy = "System"
 	body.IsActive = true
@@ -64,17 +62,19 @@ func (h *UserHandler) Create(c *fiber.Ctx) error {
 	}
 	body.IDStatus = "ACTIVE"
 
-	_, err := h.db.Exec(`
+	var generatedID string
+	err := h.db.QueryRow(`
 		INSERT INTO tb_user (prefix, user_id, project_id, house_id, full_name, phone_number, line_id, role, update_by, is_active, id_status)
+		OUTPUT INSERTED.user_id
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11)`,
-		body.Prefix, body.UserID, body.ProjectID, body.HouseID, body.FullName,
+		body.Prefix, "", body.ProjectID, body.HouseID, body.FullName,
 		body.PhoneNumber, body.LineID, body.Role, body.UpdateBy, body.IsActive, body.IDStatus,
-	)
+	).Scan(&generatedID)
 	if err != nil {
 		return c.Status(500).JSON(model.ErrorResponse{Error: err.Error()})
 	}
 
-	h.db.Get(&body, "SELECT * FROM tb_user WHERE user_id = @p1", body.UserID)
+	h.db.Get(&body, "SELECT * FROM tb_user WHERE user_id = @p1", generatedID)
 	return c.Status(201).JSON(model.SuccessResponse{Message: "created", Data: body})
 }
 

@@ -3,7 +3,6 @@ package handler
 import (
 	"aaaapi/model"
 	"fmt"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jmoiron/sqlx"
@@ -74,23 +73,24 @@ func (h *BlacklistHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(model.ErrorResponse{Error: err.Error()})
 	}
-	body.BlacklistID = fmt.Sprintf("BLK-%s", time.Now().Format("20060102150405"))
 	body.Prefix = "BLK"
 	body.UpdateBy = "System"
 	body.IsActive = true
 	body.IDStatus = "ACTIVE"
 
-	_, err := h.db.Exec(`
+	var generatedID string
+	err := h.db.QueryRow(`
 		INSERT INTO tb_blacklist (prefix, blacklist_id, project_id, license_plate, reason, update_by, is_active, id_status)
+		OUTPUT INSERTED.blacklist_id
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8)`,
-		body.Prefix, body.BlacklistID, body.ProjectID, body.LicensePlate, body.Reason,
+		body.Prefix, "", body.ProjectID, body.LicensePlate, body.Reason,
 		body.UpdateBy, body.IsActive, body.IDStatus,
-	)
+	).Scan(&generatedID)
 	if err != nil {
 		return c.Status(500).JSON(model.ErrorResponse{Error: err.Error()})
 	}
 
-	h.db.Get(&body, "SELECT * FROM tb_blacklist WHERE blacklist_id = @p1", body.BlacklistID)
+	h.db.Get(&body, "SELECT * FROM tb_blacklist WHERE blacklist_id = @p1", generatedID)
 	return c.Status(201).JSON(model.SuccessResponse{Message: "created", Data: body})
 }
 

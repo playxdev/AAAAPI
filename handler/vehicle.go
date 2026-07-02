@@ -3,7 +3,6 @@ package handler
 import (
 	"aaaapi/model"
 	"fmt"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jmoiron/sqlx"
@@ -60,23 +59,24 @@ func (h *VehicleHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(model.ErrorResponse{Error: err.Error()})
 	}
-	body.VehicleID = fmt.Sprintf("VEH-%s", time.Now().Format("20060102150405"))
 	body.Prefix = "VEH"
 	body.UpdateBy = "System"
 	body.IsActive = true
 	body.IDStatus = "ACTIVE"
 
-	_, err := h.db.Exec(`
+	var generatedID string
+	err := h.db.QueryRow(`
 		INSERT INTO tb_vehicle (prefix, vehicle_id, project_id, user_id, license_plate, province, brand, color, update_by, is_active, id_status)
+		OUTPUT INSERTED.vehicle_id
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11)`,
-		body.Prefix, body.VehicleID, body.ProjectID, body.UserID, body.LicensePlate,
+		body.Prefix, "", body.ProjectID, body.UserID, body.LicensePlate,
 		body.Province, body.Brand, body.Color, body.UpdateBy, body.IsActive, body.IDStatus,
-	)
+	).Scan(&generatedID)
 	if err != nil {
 		return c.Status(500).JSON(model.ErrorResponse{Error: err.Error()})
 	}
 
-	h.db.Get(&body, "SELECT * FROM tb_vehicle WHERE vehicle_id = @p1", body.VehicleID)
+	h.db.Get(&body, "SELECT * FROM tb_vehicle WHERE vehicle_id = @p1", generatedID)
 	return c.Status(201).JSON(model.SuccessResponse{Message: "created", Data: body})
 }
 

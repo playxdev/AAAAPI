@@ -2,8 +2,6 @@ package handler
 
 import (
 	"aaaapi/model"
-	"fmt"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jmoiron/sqlx"
@@ -49,22 +47,23 @@ func (h *ProjectHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&p); err != nil {
 		return c.Status(400).JSON(model.ErrorResponse{Error: err.Error()})
 	}
-	p.ProjectID = fmt.Sprintf("PRJ-%s", time.Now().Format("20060102150405"))
 	p.Prefix = "PRJ"
 	p.UpdateBy = "System"
 	p.IsActive = true
 	p.IDStatus = "ACTIVE"
 
-	_, err := h.db.Exec(`
+	var generatedID string
+	err := h.db.QueryRow(`
 		INSERT INTO tb_project (prefix, project_id, project_name, address, contact_number, update_by, is_active, id_status)
+		OUTPUT INSERTED.project_id
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8)`,
-		p.Prefix, p.ProjectID, p.ProjectName, p.Address, p.ContactNumber, p.UpdateBy, p.IsActive, p.IDStatus,
-	)
+		p.Prefix, "", p.ProjectName, p.Address, p.ContactNumber, p.UpdateBy, p.IsActive, p.IDStatus,
+	).Scan(&generatedID)
 	if err != nil {
 		return c.Status(500).JSON(model.ErrorResponse{Error: err.Error()})
 	}
 
-	h.db.Get(&p, "SELECT * FROM tb_project WHERE project_id = @p1", p.ProjectID)
+	h.db.Get(&p, "SELECT * FROM tb_project WHERE project_id = @p1", generatedID)
 	return c.Status(201).JSON(model.SuccessResponse{Message: "created", Data: p})
 }
 
