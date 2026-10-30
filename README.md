@@ -28,9 +28,12 @@ npx wrangler login
 npx wrangler secret put JWT_SECRET    # key เซ็น device JWT
 npx wrangler secret put CRED_PEPPER   # key HMAC ของ RFID / QR / PIN (ห้ามเปลี่ยนหลังลงทะเบียน credential แล้ว)
 # แก้ vars ใน wrangler.jsonc: ALLOWED_ORIGINS (origin ของ Pages + LIFF), LINE_CHANNEL_ID (LINE Login channel ของ LIFF)
-npx wrangler d1 migrations apply db1-aaa --remote
+CLOUDFLARE_ACCOUNT_ID=30ec5dca725dd7acef6a6ef89342e403 npx wrangler d1 migrations apply db1-aaa --remote
 npm run deploy
 ```
+
+wrangler 4.156.0: คำสั่ง `d1 migrations ...` ไม่อ่าน `account_id` จาก `wrangler.jsonc` (login นี้เห็น 2 บัญชี)
+ต้องใส่ `CLOUDFLARE_ACCOUNT_ID` เอง คำสั่งอื่น (`deploy`, `d1 execute`, `d1 info`) ใช้ค่าใน `wrangler.jsonc` ได้
 
 Schema / migrations / seed อยู่ใน repo [AAASQL](https://github.com/playxdev/AAASQL) (`migrations_dir` = `../AAASQL/migrations`)
 ต้อง clone AAAAPI กับ AAASQL ไว้ใน folder เดียวกัน ทั้ง `wrangler` และ `npm test` อ่าน migration จากที่นั่น
