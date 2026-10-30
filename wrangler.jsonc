@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "aaa-api",
+  // บัญชี Cookievirus@gmail.com (login นี้เห็น 2 บัญชี ต้องระบุ)
+  "account_id": "30ec5dca725dd7acef6a6ef89342e403",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "vars": {
+    // origin ของ Admin WebApp (Cloudflare Pages) และ LIFF app คั่นด้วย , เช่น "https://aaa-admin.pages.dev,https://liff.example.com"
+    "ALLOWED_ORIGINS": "",
+    // Channel ID ของ LINE Login channel ที่ LIFF app อยู่ (ใช้ตรวจ aud ของ ID Token)
+    "LINE_CHANNEL_ID": ""
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "db1-aaa",
+      "database_id": "e69cbde0-e4b3-4986-804c-ffab15a153a7",
+      "migrations_dir": "../AAASQL/migrations"
+    }
+  ]
+  // Secrets (ตั้งด้วย `npx wrangler secret put <NAME>` ห้ามใส่ในไฟล์นี้):
+  //   JWT_SECRET  - key สำหรับเซ็น device JWT (HS256)
+  //   CRED_PEPPER - key สำหรับ HMAC ของ RFID / QR / PIN
+}

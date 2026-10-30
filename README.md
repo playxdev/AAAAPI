@@ -1,371 +1,177 @@
-# AAAAPI — Axis Access Auto REST API v1.2.0
+# AAAAPI — Axis Auto Access API (Cloudflare Workers)
 
-Intelligent residential access management backend. Built with **Go 1.23** and **Fiber v2**, backed by **Microsoft SQL Server**. Designed for multi-tenant gated communities with offline-capable edge-to-cloud synchronization.
+Backend ตรวจสิทธิ์เข้า-ออก + Admin API + Owner API (LINE LIFF) เขียนด้วย TypeScript บน Cloudflare Workers + D1
+ภาพรวมระบบ / tech stack: repo **AAACLOUDF** · Schema: repo **AAASQL**
 
-Comes with `AAAADMIN` — a TypeScript admin SPA built with **Vite**, **Tailwind CSS v4**, and **View Transitions API**. Auto-built and served from the same process.
+Production: `https://aaa-api.cookievirus.workers.dev`
 
-## Architecture
+## โครงสร้าง
 
 ```
-    AAAADMIN (Admin SPA)        Edge Devices        Mobile / Web Clients
-          │                         │                      │
-          │ static                  │ X-API-Key            │ JWT Bearer
-          ▼                         ▼                      ▼
-   ┌─────────────────────────────────────────────────────────────┐
-   │                     AAAAPI (Go / Fiber)                     │
-   │                                                             │
-   │  /              /api/v1/edge/*   /api/v1/*                  │
-   │  (admin panel)  (API Key auth)  (JWT auth)                  │
-   └──────────────────────────┬──────────────────────────────────┘
-                              │
-                              ▼
-                  ┌─────────────────────┐
-                  │  MS SQL Server      │
-                  │  Database: AAA      │
-                  │  (8 tables, v1.2.0) │
-                  └─────────────────────┘
+src/index.ts                 routing, CORS, device token, authorize endpoint, access log
+src/authorize.ts             ตัดสินสิทธิ์ (ANPR / credential / Guest Code / policy)
+src/admin.ts                 Admin API: login, บ้าน, ลูกบ้าน, รถ, บัตร/PIN, Visitor, รหัสผูก LINE
+src/owner.ts                 Owner API (LINE LIFF): login, ผูกบัญชี, ออก / เพิกถอน Guest Code
+src/guest.ts                 ออก Guest Code / Visitor (admin + owner ใช้ร่วมกัน)
+src/audit.ts                 tb_audit_log
+src/crypto.ts                SHA-256, HMAC, JWT, PBKDF2 (WebCrypto)
+src/http.ts                  helper ของ request / response / validation
+scripts/hash-password.mjs    สร้าง hash รหัสผ่าน admin
+test/                        integration tests (workerd + D1 local)
 ```
 
-## Prerequisites
+## Setup
 
-- **Go** 1.23+
-- **Node.js** + npm (for AAAADMIN frontend build)
-- **Microsoft SQL Server** (hosted or local)
-- Database schema applied from [`AAASQL/docs/AAA.sql`](../AAASQL/docs/AAA.sql)
-
-## Quick Start
-
-```bash
-cd AAAAPI
-cp .env.example .env         # edit credentials and secrets
-go mod download              # install dependencies
-go run main.go               # auto-builds AAAADMIN, starts on FIBER_PORT
+```sh
+npm install
+npx wrangler login
+npx wrangler secret put JWT_SECRET    # key เซ็น device JWT
+npx wrangler secret put CRED_PEPPER   # key HMAC ของ RFID / QR / PIN (ห้ามเปลี่ยนหลังลงทะเบียน credential แล้ว)
+# แก้ vars ใน wrangler.jsonc: ALLOWED_ORIGINS (origin ของ Pages + LIFF), LINE_CHANNEL_ID (LINE Login channel ของ LIFF)
+npx wrangler d1 migrations apply db1-aaa --remote
+npm run deploy
 ```
 
-The server auto-builds the admin frontend from `../AAAADMIN/` on first run and serves it at `/`. If the build fails, only the API is served.
+Schema / migrations / seed อยู่ใน repo [AAASQL](https://github.com/playxdev/AAASQL) (`migrations_dir` = `../AAASQL/migrations`)
+ต้อง clone AAAAPI กับ AAASQL ไว้ใน folder เดียวกัน ทั้ง `wrangler` และ `npm test` อ่าน migration จากที่นั่น
 
-## Environment Variables
+Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievirus, D1 `db1-aaa` region APAC)
+Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
-| Variable       | Default                    | Description                        |
-|--------------- |--------------------------- |----------------------------------- |
-| `FIBER_PORT`   | `3000`                     | HTTP listen port                   |
-| `DB_HOST`      | `localhost`                | MSSQL server host                  |
-| `DB_PORT`      | `1433`                     | MSSQL port                         |
-| `DB_USER`      | `sa`                       | MSSQL username                     |
-| `DB_PASSWORD`  | *(required)*               | MSSQL password                     |
-| `DB_NAME`      | `AAA`                      | MSSQL database name                |
-| `DB_ENCRYPT`   | `disable`                  | MSSQL encryption (`disable`/`true`)|
-| `JWT_SECRET`   | `default-secret-change-me` | HS256 signing key for JWT tokens   |
-| `API_KEY`      | *(optional)*               | Shared secret for edge devices. If empty, edge routes are public. |
-| `LOG_FILE`     | *(optional)*               | Transaction log file path          |
+สถานะ production (2026-10-30):
+- Migration `0001` + `0002` apply แล้ว, policy seed แล้ว
+- โครงการ `PRJ-001` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
+- ยังว่าง: `ALLOWED_ORIGINS`, `LINE_CHANNEL_ID` (Admin WebApp / LIFF ยังเรียก API จาก browser ไม่ได้)
+- ยังไม่มี rate limit ที่ `/admin/login`, `/owner/*`, `/auth/device/token` (`workers.dev` ตั้ง WAF ไม่ได้
+  ต้องใช้ Workers Rate Limiting binding หรือย้ายไปโดเมนของตัวเอง)
 
-## Authentication
+### สร้าง Admin คนแรก
 
-Three layers:
+Admin แต่ละคนผูกกับ 1 โครงการ (`tb_admin.project_id`) และเห็นเฉพาะข้อมูลของโครงการนั้น
 
-| Layer         | Mechanism                     | Used by                       |
-|-------------- |------------------------------ |------------------------------ |
-| **Admin**     | Bcrypt-hashed password in `tb_admin` | System administrators (admin panel login) |
-| **JWT**       | `Authorization: Bearer <token>` | Mobile / Web clients          |
-| **API Key**   | `X-API-Key: <key>`            | Edge / microcontroller devices |
-
-### Admin Accounts
-
-Admin accounts live in `tb_admin` with bcrypt-hashed passwords. Admin users log in via `POST /api/v1/auth/admin/login` using their `admin_name` and password. **There is no API endpoint for creating admin accounts** — they are created exclusively via manual SQL:
-
-```sql
-INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password, admin_level)
-VALUES ('', 'PRJ-20260628-a1b2c3', 'admin', '<bcrypt-hash>', 'ADMIN');
+```sh
+node scripts/hash-password.mjs        # พิมพ์รหัสผ่าน (อย่างน้อย 12 ตัวอักษร) ได้ hash pbkdf2_sha256$...
+npx wrangler d1 execute db1-aaa --remote --command \
+  "INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password) VALUES ('ADM-001', '<project_id>', '<admin_name>', '<hash>')"
 ```
 
-Generate the bcrypt hash with:
+## Dev / Test
 
-```bash
-htpasswd -nbBC 10 admin vXrz0013 | cut -d: -f2
+```sh
+npm run dev     # local, ใช้ secrets จาก .dev.vars
+npm test
 ```
 
-See [`AAASQL/README.md`](../AAASQL/README.md) for full instructions.
+## API
 
-### JWT Tokens
+### `POST /api/v1/auth/device/token`
 
-Obtained via `POST /api/v1/auth/login`. Tokens carry `user_id`, `project_id`, and `role` claims with 24-hour expiry.
-
----
-
-## API Endpoints
-
-### Public
-
-#### `GET /api/v1/health`
-```
-200 {"status":"ok"}
-```
-
-#### `POST /api/v1/auth/login`
-Request:
 ```json
-{"user_id":"USR-20260628002538","phone_number":"0812345678"}
+{ "device_id": "D1", "device_secret": "..." }
 ```
-Response (200):
+→ `{ "access_token": "<JWT>", "token_type": "Bearer", "expires_in": 900 }`
+
+### `POST /api/v1/access/authorize`
+
+Header `Authorization: Bearer <JWT>`
+
 ```json
-{
-  "token": "eyJhbGciOiJIUzI1NiIs...",
-  "user_id": "USR-20260628002538",
-  "full_name": "Somchai Jaidee",
-  "role": "RESIDENT"
-}
+{ "event_id": "evt-unique-id", "method": "ANPR", "value": "กก9999" }
 ```
-Invalid credentials return `401 {"error":"invalid credentials"}`.
+→ `{ "event_id": "...", "decision": "YES|NO|ERROR", "reason_code": "...", "allowed_methods": ["RFID"], "policy_version": 1 }`
 
-#### `POST /api/v1/auth/admin/login`
-Admin login using `tb_admin` credentials with bcrypt password verification.
-Request:
-```json
-{"admin_name":"admin","password":"secret"}
-```
-Response (200):
-```json
-{
-  "token": "eyJhbGciOiJIUzI1NiIs...",
-  "admin_id": "ADM-20260628-a1b2c3",
-  "full_name": "admin",
-  "role": "ADMIN",
-  "project_id": "PRJ-20260628-d4e5f6"
-}
-```
-Invalid credentials return `401 {"error":"invalid credentials"}`.
+- `method`: `ANPR` / `RFID` / `QRCODE` / `PIN`
+- `event_id` ซ้ำ → ได้คำตอบเดิม ไม่ตัดสินซ้ำ
+- `ERROR` ตอบ HTTP 500 และห้ามตีความเป็น `YES`
 
-### Edge — API Key auth (public if `API_KEY` is empty)
+`reason_code`: `RESIDENT_ACTIVE`, `RESIDENT_OVERDUE_ALLOWED`, `VISITOR_VALID`, `RESIDENT_OVERDUE`, `RESIDENT_OVERDUE_SEVERE`,
+`METHOD_NOT_ALLOWED`, `BLACKLISTED`, `UNKNOWN_PLATE`, `UNKNOWN_CREDENTIAL`, `CREDENTIAL_REVOKED`,
+`CREDENTIAL_NOT_YET_VALID`, `CREDENTIAL_EXPIRED`, `CREDENTIAL_USED_UP`, `USER_INACTIVE`, `VISITOR_NOT_VALID`,
+`TOO_MANY_ATTEMPTS`, `INTERNAL_ERROR`, `LOG_FAILED`
 
-#### `GET /api/v1/edge/sync/pull?project_id=<id>`
-Pulls all authorized active data for offline caching. Returns vehicles, users, devices, and blacklist entries scoped to the project.
-```
-200 {"project_id":"PRJ-...","synced_at":"...","data":{"vehicles":[...],"users":[...],"devices":[...],"blacklist":[...]}}
-```
-Requires `project_id` query parameter. Returns `400` if missing.
+`TOO_MANY_ATTEMPTS`: อุปกรณ์เดียวกันส่ง PIN / QR ที่ไม่รู้จักครบ 10 ครั้งใน 5 นาที จะปฏิเสธ PIN / QR ของอุปกรณ์นั้นจนพ้นช่วงเวลา
+(กันสุ่ม Guest Code) ANPR และ RFID ยังใช้ได้
 
-#### `POST /api/v1/edge/sync/push`
-Pushes batched access logs from edge to cloud in a single database transaction. All logs share one `device_id`.
-Request:
-```json
-{
-  "project_id": "PRJ-20260628002538",
-  "device_id": "DEV-20260628002538",
-  "logs": [
-    {
-      "license_plate": "กข1234",
-      "access_type": "LPR",
-      "user_type": "RESIDENT",
-      "is_success": true,
-      "remark": "Edge sync push test",
-      "access_date": "2026-06-28T00:00:00Z",
-      "image_url": ""
-    }
-  ]
-}
-```
-Response (201):
-```json
-{"message":"synced 1 logs","data":{"synced_count":1}}
-```
-`device_id` is a **top-level field**; it must reference an existing `tb_device.device_id`.
+## Admin API
 
-#### `GET /api/v1/edge/validate/:plate?project_id=<id>`
-Real-time license plate validation. Checks blacklist first, then registered vehicles.
-```
-200 {"allowed":true,"reason":"registered","license_plate":"กข1234","user_id":"USR-...","full_name":"Somchai Jaidee","house_number":"88/1","access_type":"GRANTED"}
-200 {"allowed":false,"reason":"Previous incident","license_plate":"9999XX","access_type":"DENIED"}
-200 {"allowed":false,"reason":"unknown","license_plate":"กข9999","access_type":"UNKNOWN"}
-```
-Requires `project_id` query parameter.
+ทุก endpoint (ยกเว้น login) ต้องส่ง Header `Authorization: Bearer <admin JWT>`
+`project_id` มาจาก token เสมอ admin โครงการอื่นจะได้ `404` เหมือนไม่มีข้อมูล
 
-#### `GET /api/v1/edge/check/:plate?project_id=<id>`
-Quick blacklist lookup. Returns `200 {"blacklisted":true,"blacklist_id":"BLK-...","reason":"..."}` or `200 {"blacklisted":false}`.
+| Method | Endpoint | Body / หมายเหตุ |
+|---|---|---|
+| `POST` | `/api/v1/admin/login` | `{ admin_name, password }` → `{ access_token, expires_in: 3600 }` |
+| `GET` | `/api/v1/admin/houses` | รายการบ้าน |
+| `POST` | `/api/v1/admin/houses` | `{ house_number, house_code?, zone_or_soi? }` |
+| `PATCH` | `/api/v1/admin/houses/:id` | `{ house_number?, house_code?, zone_or_soi?, payment_status?, is_active? }` |
+| `GET` | `/api/v1/admin/residents` | `?house_id=` กรองตามบ้านได้ |
+| `POST` | `/api/v1/admin/residents` | `{ house_id, full_name, phone_number?, line_id? }` |
+| `GET` | `/api/v1/admin/residents/:id` | ลูกบ้าน + รถ + credential (ไม่มี hash / ค่าจริง) |
+| `PATCH` | `/api/v1/admin/residents/:id` | `{ house_id?, full_name?, phone_number?, line_id?, is_active? }` |
+| `DELETE` | `/api/v1/admin/residents/:id` | ปิดใช้งาน (soft delete) เข้าไม่ได้ทุกวิธี |
+| `POST` | `/api/v1/admin/residents/:id/vehicles` | `{ license_plate, province?, brand?, color? }` ทะเบียนซ้ำในโครงการ → `409` |
+| `DELETE` | `/api/v1/admin/vehicles/:id` | ปิดใช้งานรถ |
+| `POST` | `/api/v1/admin/residents/:id/credentials` | `{ cred_type: RFID\|QRCODE\|PIN, value, valid_from?, valid_until? }` PIN = ตัวเลข 4–8 หลัก, ซ้ำ → `409` |
+| `DELETE` | `/api/v1/admin/credentials/:id` | เพิกถอน (`REVOKED`) |
+| `POST` | `/api/v1/admin/residents/:id/link-code` | ออกรหัสผูก LINE 8 ตัว ใช้ครั้งเดียว อายุ 24 ชม. → `{ link_code }` |
+| `GET` | `/api/v1/admin/visitors` | `?house_id=` / `?valid=1` (เฉพาะที่ยังไม่หมดอายุ) |
+| `POST` | `/api/v1/admin/visitors` | `{ duration, house_id?, full_name?, phone_number?, license_plate?, purpose?, issue_code? }` ไม่ส่ง `house_id` = งานส่วนกลาง |
+| `DELETE` | `/api/v1/admin/visitors/:id` | เพิกถอน visitor + Guest Code |
 
-### Protected — JWT auth
+- `payment_status`: `NORMAL` / `OVERDUE` / `OVERDUE_SEVERE`
+- `house_code`: ตัวเลข 1–6 หลัก ไม่ขึ้นต้นด้วย 0 ไม่ซ้ำในโครงการ ต้องมีก่อนบ้านนั้นจะออก Guest Code ได้
+- Error: `{ "error": "BAD_REQUEST", "field": "<ชื่อ field>" }`, `NOT_FOUND`, `PLATE_EXISTS`, `CREDENTIAL_EXISTS`,
+  `HOUSE_CODE_MISSING`, `GUEST_CODE_UNAVAILABLE`, `CONFLICT`, `UNAUTHORIZED`
+- ค่าของ RFID / QR / PIN ถูก hash ทันที อ่านค่าจริงกลับจาก API ไม่ได้
 
-All endpoints below require `Authorization: Bearer <token>`. Data is automatically scoped to the caller's `project_id` from the JWT claim.
+## Owner API (LINE LIFF)
 
-#### Projects
-| Method   | Path                     | Description        |
-|--------- |------------------------- |------------------- |
-| `GET`    | `/api/v1/projects`       | List all projects  |
-| `GET`    | `/api/v1/projects/:id`   | Get one project    |
-| `POST`   | `/api/v1/projects`       | Create project     |
-| `PUT`    | `/api/v1/projects/:id`   | Update project     |
-| `DELETE` | `/api/v1/projects/:id`   | Soft-delete        |
+สำหรับลูกบ้าน / เจ้าของบ้าน เรียกจาก LIFF app ส่ง LIFF ID Token (`liff.getIDToken()`) มาแลก JWT
 
-#### Houses
-| Method   | Path                    | Description       |
-|--------- |------------------------ |------------------ |
-| `GET`    | `/api/v1/houses`        | List all houses   |
-| `GET`    | `/api/v1/houses/:id`    | Get one house     |
-| `POST`   | `/api/v1/houses`        | Create house      |
-| `PUT`    | `/api/v1/houses/:id`    | Update house      |
-| `DELETE` | `/api/v1/houses/:id`    | Soft-delete       |
+ผูกบัญชีครั้งแรก:
+1. Admin เรียก `POST /api/v1/admin/residents/:id/link-code` แล้วส่งรหัสให้ลูกบ้าน
+2. ลูกบ้านเปิด LIFF กรอกรหัส → LIFF เรียก `POST /api/v1/owner/link`
+3. ครั้งต่อไป LIFF เรียก `POST /api/v1/owner/login` ได้เลย
 
-#### Users
-| Method   | Path                   | Description      |
-|--------- |----------------------- |----------------- |
-| `GET`    | `/api/v1/users`        | List all users   |
-| `GET`    | `/api/v1/users/:id`    | Get one user     |
-| `POST`   | `/api/v1/users`        | Create user      |
-| `PUT`    | `/api/v1/users/:id`    | Update user      |
-| `DELETE` | `/api/v1/users/:id`    | Soft-delete      |
+| Method | Endpoint | Body / หมายเหตุ |
+|---|---|---|
+| `POST` | `/api/v1/owner/link` | `{ id_token, link_code }` → JWT; รหัสผิด / หมดอายุ → `400 INVALID_LINK_CODE`, LINE ผูกกับคนอื่นแล้ว → `409` |
+| `POST` | `/api/v1/owner/login` | `{ id_token }` → JWT; ยังไม่ผูก → `403 NOT_LINKED` |
+| `GET` | `/api/v1/owner/me` | ข้อมูลลูกบ้าน + บ้าน + `house_code` |
+| `GET` | `/api/v1/owner/visitors` | visitor ของบ้านตัวเองเท่านั้น (`?valid=1`) |
+| `POST` | `/api/v1/owner/visitors` | `{ duration, full_name?, phone_number?, license_plate?, purpose? }` → `{ visitor_id, code, valid_until }` |
+| `DELETE` | `/api/v1/owner/visitors/:id` | เพิกถอน (เฉพาะ visitor ของบ้านตัวเอง) |
 
-#### Vehicles
-| Method   | Path                      | Description         |
-|--------- |-------------------------- |-------------------- |
-| `GET`    | `/api/v1/vehicles`        | List all vehicles   |
-| `GET`    | `/api/v1/vehicles/:id`    | Get one vehicle     |
-| `POST`   | `/api/v1/vehicles`        | Create vehicle      |
-| `PUT`    | `/api/v1/vehicles/:id`    | Update vehicle      |
-| `DELETE` | `/api/v1/vehicles/:id`    | Soft-delete         |
+### Guest Code
 
-#### Devices
-| Method   | Path                      | Description         |
-|--------- |-------------------------- |-------------------- |
-| `GET`    | `/api/v1/devices`         | List all devices    |
-| `GET`    | `/api/v1/devices/:id`     | Get one device      |
-| `POST`   | `/api/v1/devices`         | Create device       |
-| `PUT`    | `/api/v1/devices/:id`     | Update device       |
-| `DELETE` | `/api/v1/devices/:id`     | Soft-delete         |
+- รูปแบบ `<house_code>+<สุ่ม 4 หลัก>` เช่น `9801+1234` งานส่วนกลาง (admin ออก ไม่มีบ้าน) ขึ้นต้น `0+` เช่น `0+5521`
+- เลขเดียวกันใช้ได้ 2 แบบ: ทำเป็น QR (เนื้อหา QR = `9801+1234`) หรือกดที่ Keypad (`98011234`, `9801#1234`, `9801*1234`)
+- `duration`: `1d` / `7d` / `14d` / `30d` / `1y` / `forever` (100 ปี)
+- DB เก็บแค่ hash: โค้ดจริงคืนให้ **ครั้งเดียว** ตอนสร้าง LIFF ต้องแสดง / แชร์ทันที (เช่น `liff.shareTargetPicker`)
+- เพิกถอนแล้วหรือหมดอายุแล้ว โค้ดเดิมไม่ถูกนำกลับมาใช้ซ้ำ
 
-#### Access Logs
-| Method | Path                        | Description          |
-|------- |---------------------------- |--------------------- |
-| `GET`  | `/api/v1/access-logs`       | List all access logs |
-| `GET`  | `/api/v1/access-logs/:id`   | Get one access log   |
-| `POST` | `/api/v1/access-logs`       | Create access log    |
+## CORS
 
-#### Blacklist
-| Method   | Path                             | Description                              |
-|--------- |--------------------------------- |----------------------------------------- |
-| `GET`    | `/api/v1/blacklist`              | List all blacklist entries               |
-| `GET`    | `/api/v1/blacklist/:id`          | Get one entry                            |
-| `POST`   | `/api/v1/blacklist`              | Create entry                             |
-| `PUT`    | `/api/v1/blacklist/:id`          | Update entry                             |
-| `DELETE` | `/api/v1/blacklist/:id`          | Soft-delete                              |
-| `GET`    | `/api/v1/blacklist/check/:plate` | Check plate (requires `?project_id=...`) |
+`/api/v1/admin/*` และ `/api/v1/owner/*` ตอบ CORS เฉพาะ origin ที่อยู่ใน `ALLOWED_ORIGINS` (คั่นด้วย `,`)
+API ของอุปกรณ์ (`/auth/device/token`, `/access/authorize`) ไม่มี CORS
 
----
+## Audit Log
 
-## Directory Structure
+ทุกการแก้ไขข้อมูลโดย admin / owner (POST / PATCH / DELETE ที่สำเร็จ), login และการผูก LINE บันทึกใน `tb_audit_log`
+(`actor_type`, `actor_id`, `action`, `target_id`, `detail`) โดยตัด `value`, `password`, `id_token`, `link_code` ออกจาก `detail`
+ส่วนการตัดสินสิทธิ์ที่ไม้กั้นทุกครั้งอยู่ใน `tb_access_log`
 
-```
-aaa/
-├── AAASQL/                    # Database schema & docs
-│   ├── README.md
-│   └── docs/
-│       ├── AAA.sql            # Full DDL (v1.1.5)
-│       ├── CONCEPT.md         # Requirements & architecture
-│       └── STANDARD.md        # Naming & design standards
-├── AAAAPI/                    # Go REST API (this repo)
-│   ├── main.go               # Entry point; auto-builds AAAADMIN
-│   ├── go.mod / go.sum        # Module: aaaapi
-│   ├── .env.example           # Environment template
-│   ├── config/
-│   │   └── config.go          # Env loader (godotenv)
-│   ├── database/
-│   │   └── database.go        # MSSQL via sqlx (25 open / 10 idle)
-│   ├── model/
-│   │   └── model.go           # Structs, DTOs, request/response types
-│   ├── handler/
-│   │   ├── auth.go            # Login / JWT (HS256, 24h)
-│   │   ├── project.go         # Project CRUD
-│   │   ├── house.go           # House CRUD
-│   │   ├── user.go            # User CRUD
-│   │   ├── vehicle.go         # Vehicle CRUD
-│   │   ├── device.go          # Device CRUD
-│   │   ├── access_log.go      # Access log CRUD
-│   │   ├── blacklist.go       # Blacklist CRUD + check
-│   │   ├── edge.go            # Edge sync (pull/push/validate)
-│   │   ├── test_helper.go     # Test utilities
-│   │   └── *_test.go          # Unit tests
-│   ├── middleware/
-│   │   ├── middleware.go      # CORS, Logger, Recover, 404, AdminStatic
-│   │   ├── auth.go            # JWT + API Key middleware
-│   │   └── auth_test.go
-│   └── router/
-│       └── router.go          # Route registration
-└── AAAADMIN/                  # TypeScript admin SPA (v1.2.0)
-    ├── index.html              # HTML shell with Google Sans font
-    ├── package.json            # v1.2.0
-    ├── vite.config.ts          # Vite + Tailwind CSS v4 + /api proxy
-    ├── tsconfig.json
-    ├── dist/                   # Built output (served by AAAAPI)
-    └── src/
-        ├── main.ts             # Entry point
-        ├── router.ts           # Hash-based client-side router
-        ├── api.ts              # HTTP client (/api/v1)
-        ├── auth.ts             # JWT + admin login
-        ├── theme.ts            # Dark/light mode + View Transitions API
-        ├── types.ts            # TypeScript interfaces
-        ├── toast.ts            # Toast notifications
-        ├── style.css           # Tailwind + custom styles + CSS variables
-        ├── utils.ts            # Shared utilities (escapeHtml, etc.)
-        ├── components/         # Reusable UI components
-        │   ├── layout.ts       # Main layout (sidebar + header + main + footer)
-        │   ├── sidebar.ts      # Left navigation (collapsible)
-        │   ├── header.ts       # Top bar (page title, theme toggle, hamburger)
-        │   ├── footer.ts       # Bottom bar (copyright, version, system status)
-        │   ├── modal.ts        # Confirm/alert styled modal dialogs
-        │   └── table-footer.ts # Pagination + data summary
-        └── pages/              # Page-specific content
-            ├── login.ts        # Admin login form
-            ├── dashboard.ts    # Stats + recent access logs
-            ├── projects.ts     # Project CRUD
-            ├── houses.ts       # House CRUD
-            ├── users.ts        # User CRUD
-            ├── vehicles.ts     # Vehicle CRUD
-            ├── devices.ts      # Device CRUD
-            ├── access-logs.ts  # Access log viewer
-            └── blacklist.ts    # Blacklist CRUD
-```
+## กติกาข้อมูล
 
-## Edge-to-Cloud Sync Flow
-
-```
-  ┌─────────────┐           ┌─────────────┐           ┌─────────────┐
-  │  Edge Device │           │  AAAAPI     │           │  MSSQL      │
-  │  (on-prem)  │           │  (cloud)    │           │  (cloud)    │
-  └──────┬──────┘           └──────┬──────┘           └──────┬──────┘
-         │                         │                         │
-         │  GET /edge/sync/pull?project_id=X                  │
-         │────────────────────────>│ ─ ─ SELECT active data ─>│
-         │<── vehicles, users,     │<── rows ─ ─ ─ ─ ─ ─ ─│
-         │    devices, blacklist   │                         │
-         │                         │                         │
-    ┌────▼──── offline operation   │                         │
-    │  cache  │ using local data   │                         │
-    └────┬────┘                    │                         │
-         │                         │                         │
-         │  POST /edge/sync/push   │                         │
-         │  {project_id, device_id,│                         │
-         │   logs:[...]}           │                         │
-         │────────────────────────>│ ─ ─ INSERT in TX ─ ─ ─>│
-         │<──── 201 Created ───────│<── committed ─────────│
-```
-
-1. **Pull** — Edge devices request active authorized data and cache it locally.
-2. **Offline** — Gates operate using cached data; access logs accumulate locally.
-3. **Push** — Pending logs synced in a single DB transaction once connectivity returns.
-4. **Validate** — Real-time plate check: blacklist → registered vehicle → UNKNOWN.
-
-## Testing
-
-```bash
-go test ./...        # all unit tests
-go test ./... -v     # verbose
-go test ./... -cover # with coverage
-```
-
-All handlers and middleware have unit tests using `sqlmock` for database isolation and `testify` for assertions. No real database required for tests.
-
-## Database
-
-See [`AAASQL/docs/AAA.sql`](../AAASQL/docs/AAA.sql) for the full schema (8 tables, v1.2.0). All tables use soft-delete (`is_active`, `is_delete`) with `AFTER UPDATE` triggers on `update_date` and `INSTEAD OF INSERT` triggers for auto-generating business IDs (format: `PREFIX-YYYYMMDD-XXXXXX`). Admin accounts use bcrypt password hashing in `tb_admin`.
-
-## License
-
-Proprietary. All rights reserved.
+- `tb_policy`: ไม่มีแถว = ไม่อนุญาต หลังเพิ่มโครงการใหม่ต้องรัน `../AAASQL/seeds/default_policy.sql`
+  (`npx wrangler d1 execute db1-aaa --remote --file=../AAASQL/seeds/default_policy.sql`) รันซ้ำได้
+  - ลูกบ้านปกติ: ANPR / RFID / QRCODE / PIN
+  - ลูกบ้านค้างชำระ (`tb_house.payment_status = 'OVERDUE'`): RFID / PIN เท่านั้น ไม่ได้ห้ามเข้า แต่ไม่ได้ใช้ ANPR
+  - ลูกบ้านค้างชำระต่อเนื่อง (`'OVERDUE_SEVERE'`): PIN เท่านั้น (ต้องกด Keypad)
+  - การเลื่อนระดับ NORMAL → OVERDUE → OVERDUE_SEVERE ตอนนี้ admin / ระบบบิลเป็นคนแก้ `payment_status` เอง
+  - Visitor: QRCODE / PIN (Guest Code ใช้ได้ทั้ง QR และ Keypad; ANPR ของ Visitor ต้องเพิ่มแถวเองรายโครงการ)
+- ทะเบียนรถใน `tb_vehicle` / `tb_visitor` / `tb_blacklist` ต้องเก็บแบบไม่มีช่องว่างและ `-` (เช่น `กก9999`)
+- `tb_device.device_secret_hash` = SHA-256 hex ของ device secret
+- `tb_credential.cred_hash` = HMAC-SHA256(`CRED_PEPPER`, `project_id:cred_type:value`) ดู `credentialHash()` ใน `src/authorize.ts`
+- เวลาใน `valid_from` / `valid_until` เป็น UTC
+- `tb_user.line_user_id` = LINE userId จาก LIFF (ไม่ใช่ `line_id`) 1 บัญชี LINE ผูกได้กับลูกบ้าน 1 คนเท่านั้น
+- PIN ของลูกบ้านห้ามซ้ำกับ Guest Code ที่ยังมีอยู่ (และกลับกัน) เพราะ Keypad ส่งมาเป็น method `PIN` เหมือนกัน
