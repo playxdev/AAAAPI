@@ -41,10 +41,11 @@ Schema / migrations / seed อยู่ใน repo [AAASQL](https://github.com/p
 Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievirus, D1 `db1-aaa` region APAC)
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
-สถานะ production (2026-10-30):
+สถานะ production (2026-11-11):
 - Migration `0001` + `0002` apply แล้ว, policy seed แล้ว
 - โครงการ `PRJ-001` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
-- ยังว่าง: `ALLOWED_ORIGINS`, `LINE_CHANNEL_ID` (Admin WebApp / LIFF ยังเรียก API จาก browser ไม่ได้)
+- `ALLOWED_ORIGINS` = `https://aaa-admin.pages.dev` (Admin WebApp, ตรงกันทั้งตัว URL preview ของ Pages ใช้ไม่ได้)
+- ยังว่าง: `LINE_CHANNEL_ID` (LIFF ยังเรียก API ไม่ได้)
 - ยังไม่มี rate limit ที่ `/admin/login`, `/owner/*`, `/auth/device/token` (`workers.dev` ตั้ง WAF ไม่ได้
   ต้องใช้ Workers Rate Limiting binding หรือย้ายไปโดเมนของตัวเอง)
 
@@ -79,20 +80,22 @@ npm test
 Header `Authorization: Bearer <JWT>`
 
 ```json
-{ "event_id": "evt-unique-id", "method": "ANPR", "value": "กก9999" }
+{ "event_id": "evt-unique-id", "method": "ANPR", "value": "กก9999", "house_code": "9801" }
 ```
 → `{ "event_id": "...", "decision": "YES|NO|ERROR", "reason_code": "...", "allowed_methods": ["RFID"], "policy_version": 1 }`
 
 - `method`: `ANPR` / `RFID` / `QRCODE` / `PIN`
 - `event_id` ซ้ำ → ได้คำตอบเดิม ไม่ตัดสินซ้ำ
 - `ERROR` ตอบ HTTP 500 และห้ามตีความเป็น `YES`
+- `house_code` ไม่บังคับ: ใช้ตรวจซ้ำว่า credential / ทะเบียนเป็นของบ้านนั้น ไม่ตรง → `NO` + `HOUSE_MISMATCH` รูปแบบผิด → 400
+- บ้านที่ปิดใช้งาน (`tb_house.is_active = 0`): ลูกบ้านได้ `USER_INACTIVE`, Visitor ของบ้านนั้นได้ `VISITOR_NOT_VALID` (ทะเบียน = `UNKNOWN_PLATE`)
 
 `reason_code`: `RESIDENT_ACTIVE`, `RESIDENT_OVERDUE_ALLOWED`, `VISITOR_VALID`, `RESIDENT_OVERDUE`, `RESIDENT_OVERDUE_SEVERE`,
 `METHOD_NOT_ALLOWED`, `BLACKLISTED`, `UNKNOWN_PLATE`, `UNKNOWN_CREDENTIAL`, `CREDENTIAL_REVOKED`,
 `CREDENTIAL_NOT_YET_VALID`, `CREDENTIAL_EXPIRED`, `CREDENTIAL_USED_UP`, `USER_INACTIVE`, `VISITOR_NOT_VALID`,
-`TOO_MANY_ATTEMPTS`, `INTERNAL_ERROR`, `LOG_FAILED`
+`HOUSE_MISMATCH`, `TOO_MANY_ATTEMPTS`, `INTERNAL_ERROR`, `LOG_FAILED`
 
-`TOO_MANY_ATTEMPTS`: อุปกรณ์เดียวกันส่ง PIN / QR ที่ไม่รู้จักครบ 10 ครั้งใน 5 นาที จะปฏิเสธ PIN / QR ของอุปกรณ์นั้นจนพ้นช่วงเวลา
+`TOO_MANY_ATTEMPTS`: อุปกรณ์เดียวกันส่ง PIN / QR ที่ไม่รู้จัก (หรือ `HOUSE_MISMATCH`) ครบ 10 ครั้งใน 5 นาที จะปฏิเสธ PIN / QR ของอุปกรณ์นั้นจนพ้นช่วงเวลา
 (กันสุ่ม Guest Code) ANPR และ RFID ยังใช้ได้
 
 ## Admin API
