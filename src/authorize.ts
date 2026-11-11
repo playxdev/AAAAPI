@@ -14,7 +14,8 @@ export interface Decision {
 	credential_ref?: string;
 }
 
-type Identity = { subject: Subject; credentialId?: string } | { reason: string };
+// houseCode = tb_house.house_code ของเจ้าของ credential (null = ไม่มีบ้าน เช่น Visitor งานส่วนกลาง)
+type Identity = { subject: Subject; credentialId?: string; houseCode: string | null } | { reason: string };
 
 const YES_REASON: Record<Subject, string> = {
 	RESIDENT: "RESIDENT_ACTIVE",
@@ -40,12 +41,14 @@ export function guestDigits(value: string): string | null {
 	return /^\d{5,10}$/.test(digits) ? digits : null;
 }
 
-export async function decide(env: Env, projectId: string, method: Method, value: string): Promise<Decision> {
+// houseCode จาก SEMA ใช้ตรวจซ้ำเท่านั้น: credential ต้องเป็นของบ้านนั้น ไม่ใช้ตัดสินสิทธิ์
+export async function decide(env: Env, projectId: string, method: Method, value: string, houseCode?: string): Promise<Decision> {
 	const who =
 		method === "ANPR"
 			? await identifyPlate(env.DB, projectId, normalizePlate(value))
 			: await identifyCredential(env, projectId, method, value);
 	if ("reason" in who) return { decision: "NO", reason_code: who.reason, allowed_methods: [] };
+	if (houseCode !== undefined && who.houseCode !== houseCode) return { decision: "NO", reason_code: "HOUSE_MISMATCH", allowed_methods: [] };
 
 	const allowed = await allowedMethods(env.DB, projectId, who.subject);
 	const base = { subject: who.subject, allowed_methods: allowed, credential_ref: who.credentialId };
@@ -68,26 +71,29 @@ async function identifyPlate(db: D1Database, projectId: string, plate: string): 
 
 	const resident = await db
 		.prepare(
-			`SELECT h.payment_status FROM tb_vehicle v
+			`SELECT h.payment_status, h.house_code, h.is_active AS house_active FROM tb_vehicle v
 			 JOIN tb_user u ON u.user_id = v.user_id
 			 LEFT JOIN tb_house h ON h.house_id = u.house_id
 			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1 AND u.is_active = 1
 			 LIMIT 1`,
 		)
 		.bind(projectId, plate)
-		.first<{ payment_status: string | null }>();
-	if (resident) return { subject: residentSubject(resident.payment_status) };
+		.first<{ payment_status: string | null; house_code: string | null; house_active: number | null }>();
+	// บ้านที่ปิดใช้งาน = ลูกบ้านทุกคนในบ้านนั้นเข้าไม่ได้
+	if (resident?.house_active === 0) return { reason: "USER_INACTIVE" };
+	if (resident) return { subject: residentSubject(resident.payment_status), houseCode: resident.house_code };
 
 	const visitor = await db
 		.prepare(
-			`SELECT 1 FROM tb_visitor
-			 WHERE project_id = ? AND license_plate = ? AND is_active = 1
-			   AND datetime('now') BETWEEN datetime(valid_from) AND datetime(valid_until)
+			`SELECT h.house_code FROM tb_visitor v
+			 LEFT JOIN tb_house h ON h.house_id = v.house_id
+			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1 AND (v.house_id IS NULL OR h.is_active = 1)
+			   AND datetime('now') BETWEEN datetime(v.valid_from) AND datetime(v.valid_until)
 			 LIMIT 1`,
 		)
 		.bind(projectId, plate)
-		.first();
-	if (visitor) return { subject: "VISITOR" };
+		.first<{ house_code: string | null }>();
+	if (visitor) return { subject: "VISITOR", houseCode: visitor.house_code };
 
 	return { reason: "UNKNOWN_PLATE" };
 }
@@ -102,7 +108,9 @@ interface CredentialRow {
 	started: number;
 	not_expired: number;
 	user_active: number | null;
+	house_active: number | null;
 	payment_status: string | null;
+	house_code: string | null;
 	visitor_valid: number;
 }
 
@@ -111,12 +119,13 @@ const findCredential = async (env: Env, projectId: string, credType: CredType, v
 		`SELECT c.credential_id, c.user_id, c.is_active, c.id_status, c.max_uses, c.use_count,
 		   (c.valid_from IS NULL OR datetime(c.valid_from) <= datetime('now')) AS started,
 		   (c.valid_until IS NULL OR datetime(c.valid_until) >= datetime('now')) AS not_expired,
-		   u.is_active AS user_active, h.payment_status,
+		   u.is_active AS user_active, COALESCE(h.is_active, vh.is_active) AS house_active, h.payment_status, COALESCE(h.house_code, vh.house_code) AS house_code,
 		   (vis.is_active = 1 AND datetime('now') BETWEEN datetime(vis.valid_from) AND datetime(vis.valid_until)) AS visitor_valid
 		 FROM tb_credential c
 		 LEFT JOIN tb_user u ON u.user_id = c.user_id
 		 LEFT JOIN tb_house h ON h.house_id = u.house_id
 		 LEFT JOIN tb_visitor vis ON vis.visitor_id = c.visitor_id
+		 LEFT JOIN tb_house vh ON vh.house_id = vis.house_id
 		 WHERE c.project_id = ? AND c.cred_type = ? AND c.cred_hash = ?`,
 	)
 		.bind(projectId, credType, await credentialHash(env.CRED_PEPPER, projectId, credType, value))
@@ -134,11 +143,11 @@ async function identifyCredential(env: Env, projectId: string, method: Method, v
 	if (c.max_uses !== null && c.use_count >= c.max_uses) return { reason: "CREDENTIAL_USED_UP" };
 
 	if (c.user_id) {
-		if (c.user_active !== 1) return { reason: "USER_INACTIVE" };
-		return { subject: residentSubject(c.payment_status), credentialId: c.credential_id };
+		if (c.user_active !== 1 || c.house_active === 0) return { reason: "USER_INACTIVE" };
+		return { subject: residentSubject(c.payment_status), credentialId: c.credential_id, houseCode: c.house_code };
 	}
-	if (!c.visitor_valid) return { reason: "VISITOR_NOT_VALID" };
-	return { subject: "VISITOR", credentialId: c.credential_id };
+	if (!c.visitor_valid || c.house_active === 0) return { reason: "VISITOR_NOT_VALID" };
+	return { subject: "VISITOR", credentialId: c.credential_id, houseCode: c.house_code };
 }
 
 async function allowedMethods(db: D1Database, projectId: string, subject: Subject): Promise<Method[]> {

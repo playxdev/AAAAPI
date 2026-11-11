@@ -8,7 +8,7 @@
   "observability": { "enabled": true },
   "vars": {
     // origin ของ Admin WebApp (Cloudflare Pages) และ LIFF app คั่นด้วย , เช่น "https://aaa-admin.pages.dev,https://liff.example.com"
-    "ALLOWED_ORIGINS": "",
+    "ALLOWED_ORIGINS": "https://aaa-admin.pages.dev",
     // Channel ID ของ LINE Login channel ที่ LIFF app อยู่ (ใช้ตรวจ aud ของ ID Token)
     "LINE_CHANNEL_ID": ""
   },

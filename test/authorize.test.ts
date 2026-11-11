@@ -47,6 +47,7 @@ async function seed() {
 		`INSERT OR IGNORE INTO tb_credential (credential_id, project_id, visitor_id, cred_type, cred_hash, id_status) VALUES ('C_QR_REV', '${P}', 'VS1', 'QRCODE', '${await h("QRCODE", "qr-revoked")}', 'REVOKED')`,
 		`INSERT OR IGNORE INTO tb_credential (credential_id, project_id, visitor_id, cred_type, cred_hash, valid_until) VALUES ('C_QR_EXP', '${P}', 'VS1', 'QRCODE', '${await h("QRCODE", "qr-expired")}', datetime('now', '-1 minute'))`,
 	];
+	stmts.push(`UPDATE tb_house SET house_code = '11' WHERE house_id = 'H1'`, `UPDATE tb_house SET house_code = '12' WHERE house_id = 'H2'`);
 	const policy: [string, Method][] = [
 		["RESIDENT", "ANPR"], ["RESIDENT", "RFID"], ["RESIDENT", "QRCODE"], ["RESIDENT", "PIN"],
 		["RESIDENT_OVERDUE", "RFID"], ["RESIDENT_OVERDUE", "PIN"],
@@ -64,8 +65,8 @@ async function token(deviceId = "D1") {
 }
 
 let n = 0;
-async function ask(method: Method, value: string, eventId = `evt-${++n}-${crypto.randomUUID()}`) {
-	const res = await post("/api/v1/access/authorize", { event_id: eventId, method, value }, await token());
+async function ask(method: Method, value: string, eventId = `evt-${++n}-${crypto.randomUUID()}`, house_code?: string) {
+	const res = await post("/api/v1/access/authorize", { event_id: eventId, method, value, house_code }, await token());
 	return { status: res.status, body: (await res.json()) as { decision: string; reason_code: string; allowed_methods: string[] } };
 }
 
@@ -119,6 +120,18 @@ describe("ANPR", () => {
 	it("allows a visitor plate inside its time window", async () => {
 		expect((await ask("ANPR", "คค5555")).body).toMatchObject({ decision: "YES", reason_code: "VISITOR_VALID" });
 	});
+
+	it("disabled house blocks its residents and visitors on every method", async () => {
+		await env.DB.prepare("UPDATE tb_house SET is_active = 0 WHERE house_id = 'H1'").run();
+		try {
+			expect((await ask("ANPR", "กก9999")).body).toMatchObject({ decision: "NO", reason_code: "USER_INACTIVE" });
+			expect((await ask("PIN", PIN)).body).toMatchObject({ decision: "NO", reason_code: "USER_INACTIVE" });
+			expect((await ask("ANPR", "คค5555")).body).toMatchObject({ decision: "NO", reason_code: "UNKNOWN_PLATE" });
+			expect((await ask("QRCODE", "qr-once")).body).toMatchObject({ decision: "NO", reason_code: "VISITOR_NOT_VALID" });
+		} finally {
+			await env.DB.prepare("UPDATE tb_house SET is_active = 1 WHERE house_id = 'H1'").run();
+		}
+	});
 });
 
 describe("credentials", () => {
@@ -143,6 +156,25 @@ describe("credentials", () => {
 		expect(JSON.stringify(log)).not.toContain(PIN);
 		const cred = await env.DB.prepare("SELECT cred_hash FROM tb_credential WHERE credential_id = 'C_PIN1'").first<string>("cred_hash");
 		expect(cred).not.toContain(PIN);
+	});
+});
+
+describe("house_code cross-check", () => {
+	it("passes when credential belongs to the house, NO when it does not", async () => {
+		expect((await ask("PIN", PIN, undefined, "11")).body).toMatchObject({ decision: "YES" });
+		expect((await ask("ANPR", "กก9999", undefined, "11")).body).toMatchObject({ decision: "YES" });
+		expect((await ask("ANPR", "คค5555", undefined, "11")).body).toMatchObject({ decision: "YES", reason_code: "VISITOR_VALID" });
+		expect((await ask("PIN", PIN, undefined, "12")).body).toMatchObject({ decision: "NO", reason_code: "HOUSE_MISMATCH" });
+		expect((await ask("RFID", "CARD-U2", undefined, "11")).body).toMatchObject({ decision: "NO", reason_code: "HOUSE_MISMATCH" });
+		// house without house_code never matches
+		expect((await ask("PIN", "662288", undefined, "13")).body).toMatchObject({ decision: "NO", reason_code: "HOUSE_MISMATCH" });
+	});
+
+	it("rejects malformed house_code", async () => {
+		for (const house_code of ["0", "abc", 11, "1234567"]) {
+			const res = await post("/api/v1/access/authorize", { event_id: `e-hc-${house_code}`, method: "PIN", value: PIN, house_code }, await token());
+			expect(res.status).toBe(400);
+		}
 	});
 });
 

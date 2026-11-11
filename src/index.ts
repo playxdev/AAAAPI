@@ -1,5 +1,6 @@
 import { decide, METHODS, normalizePlate, type Decision, type Method } from "./authorize";
 import { handleAdmin } from "./admin";
+import { HOUSE_CODE_RE } from "./guest";
 import { handleOwner } from "./owner";
 import { JWT_ISS, safeEqual, sha256Hex, signJwt, verifyJwt } from "./crypto";
 import { isStr, json, readJson } from "./http";
@@ -13,7 +14,7 @@ const FAILED_CODE_WINDOW = "-5 minutes";
 async function tooManyFailedCodes(env: Env, deviceId: string): Promise<boolean> {
 	const failed = await env.DB.prepare(
 		`SELECT COUNT(*) AS n FROM tb_access_log
-		 WHERE device_id = ? AND timestamp > datetime('now', ?) AND reason_code = 'UNKNOWN_CREDENTIAL'`,
+		 WHERE device_id = ? AND timestamp > datetime('now', ?) AND reason_code IN ('UNKNOWN_CREDENTIAL', 'HOUSE_MISMATCH')`,
 	)
 		.bind(deviceId, FAILED_CODE_WINDOW)
 		.first<number>("n");
@@ -66,7 +67,7 @@ interface LogRow {
 	policy_version: number | null;
 }
 
-// POST /api/v1/access/authorize  { event_id, method, value } -> YES / NO / ERROR
+// POST /api/v1/access/authorize  { event_id, method, value, house_code? } -> YES / NO / ERROR
 async function authorize(req: Request, env: Env): Promise<Response> {
 	const auth = req.headers.get("Authorization") ?? "";
 	const claims = auth.startsWith("Bearer ") ? await verifyJwt(env.JWT_SECRET, auth.slice(7), JWT_ISS, JWT_AUD) : null;
@@ -76,7 +77,11 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 
 	const body = await readJson(req);
 	const method = body?.method as Method;
-	if (!isStr(body?.event_id, 128) || !METHODS.includes(method) || !isStr(body?.value, 256)) {
+	const houseCode = body?.house_code;
+	if (
+		!isStr(body?.event_id, 128) || !METHODS.includes(method) || !isStr(body?.value, 256) ||
+		(houseCode !== undefined && !(typeof houseCode === "string" && HOUSE_CODE_RE.test(houseCode)))
+	) {
 		return json({ error: "BAD_REQUEST" }, 400);
 	}
 	const eventId = body.event_id;
@@ -102,7 +107,7 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 		const locked = (method === "PIN" || method === "QRCODE") && (await tooManyFailedCodes(env, claims.sub));
 		result = locked
 			? { decision: "NO", reason_code: "TOO_MANY_ATTEMPTS", allowed_methods: [] }
-			: await decide(env, projectId, method, body.value);
+			: await decide(env, projectId, method, body.value, houseCode as string | undefined);
 	} catch (err) {
 		console.error("authorize failed", eventId, err);
 		result = { decision: "ERROR", reason_code: "INTERNAL_ERROR", allowed_methods: [] };
