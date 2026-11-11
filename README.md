@@ -41,9 +41,10 @@ Schema / migrations / seed อยู่ใน repo [AAASQL](https://github.com/p
 Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievirus, D1 `db1-aaa` region APAC)
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
-สถานะ production (2026-11-11):
+สถานะ production (2026-11-12, beta):
 - Migration `0001` + `0002` apply แล้ว, policy seed แล้ว
-- โครงการ `PRJ-001` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
+- โครงการ `PRJ-000` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
+- ล้างข้อมูลทดสอบแล้ว 2026-11-12 (เหลือโครงการ, admin, policy) ข้อมูลยังเป็น beta ล้างได้
 - `ALLOWED_ORIGINS` = `https://aaa-admin.pages.dev` (Admin WebApp, ตรงกันทั้งตัว URL preview ของ Pages ใช้ไม่ได้)
 - ยังว่าง: `LINE_CHANNEL_ID` (LIFF ยังเรียก API ไม่ได้)
 - ยังไม่มี rate limit ที่ `/admin/login`, `/owner/*`, `/auth/device/token` (`workers.dev` ตั้ง WAF ไม่ได้
