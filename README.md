@@ -42,7 +42,8 @@ Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievir
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
 สถานะ production (2026-11-12, beta):
-- Migration `0001` + `0002` apply แล้ว, policy seed แล้ว
+- Migration `0001`–`0003` apply แล้ว, policy seed แล้ว
+- Device ทดสอบของ SEMA: `SEMA-000-01` (`PRJ-000`, ทางเข้า)
 - โครงการ `PRJ-000` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
 - ล้างข้อมูลทดสอบแล้ว 2026-11-12 (เหลือโครงการ, admin, policy) ข้อมูลยังเป็น beta ล้างได้
 - `ALLOWED_ORIGINS` = `https://aaa-admin.pages.dev` (Admin WebApp, ตรงกันทั้งตัว URL preview ของ Pages ใช้ไม่ได้)
@@ -83,7 +84,9 @@ Header `Authorization: Bearer <JWT>`
 ```json
 { "event_id": "evt-unique-id", "method": "ANPR", "value": "กก9999", "house_code": "9801" }
 ```
-→ `{ "event_id": "...", "decision": "YES|NO|ERROR", "reason_code": "...", "allowed_methods": ["RFID"], "policy_version": 1 }`
+→ `{ "event_id": "...", "decision": "YES|NO|ERROR", "house_number": "98/6", "reason_code": "...", "allowed_methods": ["RFID"], "policy_version": 1 }`
+
+- `house_number` = บ้านเลขที่ของเจ้าของ input ส่งเมื่อ `YES` (`NO` / Visitor งานส่วนกลาง = `null`) SEMA ใช้แค่ `decision` + `house_number` ก็พอ
 
 - `method`: `ANPR` / `RFID` / `QRCODE` / `PIN`
 - `event_id` ซ้ำ → ได้คำตอบเดิม ไม่ตัดสินซ้ำ

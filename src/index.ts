@@ -65,6 +65,7 @@ interface LogRow {
 	reason_code: string;
 	allowed_methods: string | null;
 	policy_version: number | null;
+	house_number: string | null;
 }
 
 // POST /api/v1/access/authorize  { event_id, method, value, house_code? } -> YES / NO / ERROR
@@ -89,13 +90,13 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 
 	// Idempotency: event_id เดิมได้คำตอบเดิม ไม่ตัดสินซ้ำ
 	const prev = await env.DB.prepare(
-		"SELECT project_id, decision, reason_code, allowed_methods, policy_version FROM tb_access_log WHERE log_id = ?",
+		"SELECT project_id, decision, reason_code, allowed_methods, policy_version, house_number FROM tb_access_log WHERE log_id = ?",
 	)
 		.bind(eventId)
 		.first<LogRow>();
 	if (prev) {
 		if (prev.project_id !== projectId) return json({ error: "EVENT_ID_CONFLICT" }, 409);
-		return respond(eventId, prev.decision, prev.reason_code, prev.allowed_methods?.split(",").filter(Boolean) ?? [], prev.policy_version);
+		return respond(eventId, prev.decision, prev.reason_code, prev.allowed_methods?.split(",").filter(Boolean) ?? [], prev.policy_version, prev.house_number);
 	}
 
 	let result: Decision;
@@ -117,8 +118,8 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 		await env.DB.prepare(
 			`INSERT INTO tb_access_log
 			   (log_id, project_id, device_id, license_plate, access_type, user_type, is_success, id_status,
-			    method, decision, reason_code, allowed_methods, policy_version, credential_ref)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			    method, decision, reason_code, allowed_methods, policy_version, credential_ref, house_number)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(log_id) DO NOTHING`,
 		)
 			.bind(
@@ -136,6 +137,7 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 				result.allowed_methods.join(","),
 				policyVersion,
 				result.credential_ref ?? null,
+				result.house_number ?? null,
 			)
 			.run();
 	} catch (err) {
@@ -144,7 +146,7 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 		result = { decision: "ERROR", reason_code: "LOG_FAILED", allowed_methods: [] };
 	}
 
-	return respond(eventId, result.decision, result.reason_code, result.allowed_methods, policyVersion);
+	return respond(eventId, result.decision, result.reason_code, result.allowed_methods, policyVersion, result.house_number ?? null);
 }
 
 const respond = (
@@ -153,7 +155,8 @@ const respond = (
 	reason_code: string,
 	allowed_methods: string[],
 	policy_version: number | null,
-) => json({ event_id: eventId, decision, reason_code, allowed_methods, policy_version }, decision === "ERROR" ? 500 : 200);
+	house_number: string | null,
+) => json({ event_id: eventId, decision, reason_code, allowed_methods, policy_version, house_number }, decision === "ERROR" ? 500 : 200);
 
 // API ที่เรียกจาก browser (Admin WebApp บน Pages, LINE LIFF) ต้องมี CORS
 const BROWSER_API_PREFIXES = ["/api/v1/admin/", "/api/v1/owner/"];

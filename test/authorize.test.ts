@@ -94,11 +94,11 @@ describe("device token", () => {
 describe("ANPR", () => {
 	it("allows an active resident plate, ignoring spaces", async () => {
 		const { body } = await ask("ANPR", "กก 9999");
-		expect(body).toMatchObject({ decision: "YES", reason_code: "RESIDENT_ACTIVE" });
+		expect(body).toMatchObject({ decision: "YES", reason_code: "RESIDENT_ACTIVE", house_number: "1/1" });
 	});
 
 	it("rejects unknown and blacklisted plates", async () => {
-		expect((await ask("ANPR", "ZZ0000")).body).toMatchObject({ decision: "NO", reason_code: "UNKNOWN_PLATE" });
+		expect((await ask("ANPR", "ZZ0000")).body).toMatchObject({ decision: "NO", reason_code: "UNKNOWN_PLATE", house_number: null });
 		expect((await ask("ANPR", "ดด6666")).body).toMatchObject({ decision: "NO", reason_code: "BLACKLISTED" });
 	});
 
@@ -137,8 +137,8 @@ describe("ANPR", () => {
 describe("credentials", () => {
 	it("one-time visitor QR works once, replay of same event_id returns same answer", async () => {
 		const first = await ask("QRCODE", "qr-once", "evt-qr-once");
-		expect(first.body).toMatchObject({ decision: "YES", reason_code: "VISITOR_VALID" });
-		expect((await ask("QRCODE", "qr-once", "evt-qr-once")).body).toMatchObject({ decision: "YES" });
+		expect(first.body).toMatchObject({ decision: "YES", reason_code: "VISITOR_VALID", house_number: "1/1" });
+		expect((await ask("QRCODE", "qr-once", "evt-qr-once")).body).toMatchObject({ decision: "YES", house_number: "1/1" });
 		expect((await ask("QRCODE", "qr-once")).body).toMatchObject({ decision: "NO", reason_code: "CREDENTIAL_USED_UP" });
 	});
 

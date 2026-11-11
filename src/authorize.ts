@@ -12,10 +12,12 @@ export interface Decision {
 	allowed_methods: Method[];
 	subject?: Subject;
 	credential_ref?: string;
+	// บ้านเลขที่ของเจ้าของ input ส่งเฉพาะ YES (null = Visitor งานส่วนกลาง)
+	house_number?: string | null;
 }
 
 // houseCode = tb_house.house_code ของเจ้าของ credential (null = ไม่มีบ้าน เช่น Visitor งานส่วนกลาง)
-type Identity = { subject: Subject; credentialId?: string; houseCode: string | null } | { reason: string };
+type Identity = { subject: Subject; credentialId?: string; houseCode: string | null; houseNumber: string | null } | { reason: string };
 
 const YES_REASON: Record<Subject, string> = {
 	RESIDENT: "RESIDENT_ACTIVE",
@@ -59,7 +61,7 @@ export async function decide(env: Env, projectId: string, method: Method, value:
 	if (who.credentialId && !(await consumeCredential(env.DB, who.credentialId))) {
 		return { ...base, decision: "NO", reason_code: "CREDENTIAL_USED_UP" };
 	}
-	return { ...base, decision: "YES", reason_code: YES_REASON[who.subject] };
+	return { ...base, decision: "YES", reason_code: YES_REASON[who.subject], house_number: who.houseNumber };
 }
 
 async function identifyPlate(db: D1Database, projectId: string, plate: string): Promise<Identity> {
@@ -71,29 +73,29 @@ async function identifyPlate(db: D1Database, projectId: string, plate: string): 
 
 	const resident = await db
 		.prepare(
-			`SELECT h.payment_status, h.house_code, h.is_active AS house_active FROM tb_vehicle v
+			`SELECT h.payment_status, h.house_code, h.house_number, h.is_active AS house_active FROM tb_vehicle v
 			 JOIN tb_user u ON u.user_id = v.user_id
 			 LEFT JOIN tb_house h ON h.house_id = u.house_id
 			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1 AND u.is_active = 1
 			 LIMIT 1`,
 		)
 		.bind(projectId, plate)
-		.first<{ payment_status: string | null; house_code: string | null; house_active: number | null }>();
+		.first<{ payment_status: string | null; house_code: string | null; house_number: string | null; house_active: number | null }>();
 	// บ้านที่ปิดใช้งาน = ลูกบ้านทุกคนในบ้านนั้นเข้าไม่ได้
 	if (resident?.house_active === 0) return { reason: "USER_INACTIVE" };
-	if (resident) return { subject: residentSubject(resident.payment_status), houseCode: resident.house_code };
+	if (resident) return { subject: residentSubject(resident.payment_status), houseCode: resident.house_code, houseNumber: resident.house_number };
 
 	const visitor = await db
 		.prepare(
-			`SELECT h.house_code FROM tb_visitor v
+			`SELECT h.house_code, h.house_number FROM tb_visitor v
 			 LEFT JOIN tb_house h ON h.house_id = v.house_id
 			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1 AND (v.house_id IS NULL OR h.is_active = 1)
 			   AND datetime('now') BETWEEN datetime(v.valid_from) AND datetime(v.valid_until)
 			 LIMIT 1`,
 		)
 		.bind(projectId, plate)
-		.first<{ house_code: string | null }>();
-	if (visitor) return { subject: "VISITOR", houseCode: visitor.house_code };
+		.first<{ house_code: string | null; house_number: string | null }>();
+	if (visitor) return { subject: "VISITOR", houseCode: visitor.house_code, houseNumber: visitor.house_number };
 
 	return { reason: "UNKNOWN_PLATE" };
 }
@@ -111,6 +113,7 @@ interface CredentialRow {
 	house_active: number | null;
 	payment_status: string | null;
 	house_code: string | null;
+	house_number: string | null;
 	visitor_valid: number;
 }
 
@@ -120,6 +123,7 @@ const findCredential = async (env: Env, projectId: string, credType: CredType, v
 		   (c.valid_from IS NULL OR datetime(c.valid_from) <= datetime('now')) AS started,
 		   (c.valid_until IS NULL OR datetime(c.valid_until) >= datetime('now')) AS not_expired,
 		   u.is_active AS user_active, COALESCE(h.is_active, vh.is_active) AS house_active, h.payment_status, COALESCE(h.house_code, vh.house_code) AS house_code,
+		   COALESCE(h.house_number, vh.house_number) AS house_number,
 		   (vis.is_active = 1 AND datetime('now') BETWEEN datetime(vis.valid_from) AND datetime(vis.valid_until)) AS visitor_valid
 		 FROM tb_credential c
 		 LEFT JOIN tb_user u ON u.user_id = c.user_id
@@ -144,10 +148,10 @@ async function identifyCredential(env: Env, projectId: string, method: Method, v
 
 	if (c.user_id) {
 		if (c.user_active !== 1 || c.house_active === 0) return { reason: "USER_INACTIVE" };
-		return { subject: residentSubject(c.payment_status), credentialId: c.credential_id, houseCode: c.house_code };
+		return { subject: residentSubject(c.payment_status), credentialId: c.credential_id, houseCode: c.house_code, houseNumber: c.house_number };
 	}
 	if (!c.visitor_valid || c.house_active === 0) return { reason: "VISITOR_NOT_VALID" };
-	return { subject: "VISITOR", credentialId: c.credential_id, houseCode: c.house_code };
+	return { subject: "VISITOR", credentialId: c.credential_id, houseCode: c.house_code, houseNumber: c.house_number };
 }
 
 async function allowedMethods(db: D1Database, projectId: string, subject: Subject): Promise<Method[]> {
