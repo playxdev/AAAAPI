@@ -68,7 +68,9 @@ interface LogRow {
 	house_number: string | null;
 }
 
-// POST /api/v1/access/authorize  { event_id, method, value, house_code? } -> YES / NO / ERROR
+const DIRECTIONS = ["ENTRY", "EXIT"];
+
+// POST /api/v1/access/authorize  { event_id, method, value, house_code?, direction? } -> YES / NO / ERROR
 async function authorize(req: Request, env: Env): Promise<Response> {
 	const auth = req.headers.get("Authorization") ?? "";
 	const claims = auth.startsWith("Bearer ") ? await verifyJwt(env.JWT_SECRET, auth.slice(7), JWT_ISS, JWT_AUD) : null;
@@ -79,9 +81,11 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 	const body = await readJson(req);
 	const method = body?.method as Method;
 	const houseCode = body?.house_code;
+	const direction = body?.direction;
 	if (
 		!isStr(body?.event_id, 128) || !METHODS.includes(method) || !isStr(body?.value, 256) ||
-		(houseCode !== undefined && !(typeof houseCode === "string" && HOUSE_CODE_RE.test(houseCode)))
+		(houseCode !== undefined && !(typeof houseCode === "string" && HOUSE_CODE_RE.test(houseCode))) ||
+		(direction !== undefined && !DIRECTIONS.includes(direction as string))
 	) {
 		return json({ error: "BAD_REQUEST" }, 400);
 	}
@@ -127,7 +131,8 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 				projectId,
 				claims.sub,
 				method === "ANPR" ? normalizePlate(body.value) : null,
-				device.direction,
+				// SEMA ตัวเดียวคุมทั้งฝั่งเข้า/ออก -> ใช้ทิศจาก event ก่อน, ไม่ส่งมาใช้ค่าของอุปกรณ์
+				direction ?? device.direction,
 				result.subject ?? "UNKNOWN",
 				result.decision === "YES" ? 1 : 0,
 				result.decision,

@@ -184,3 +184,21 @@ describe("request validation", () => {
 		expect(res.status).toBe(400);
 	});
 });
+
+describe("direction", () => {
+	const accessType = (id: string) =>
+		env.DB.prepare("SELECT access_type FROM tb_access_log WHERE log_id = ?").bind(id).first<string>("access_type");
+
+	it("logs event direction, falling back to the device's", async () => {
+		const t = await token();
+		await post("/api/v1/access/authorize", { event_id: "e-dir-out", method: "PIN", value: PIN, direction: "EXIT" }, t);
+		await post("/api/v1/access/authorize", { event_id: "e-dir-def", method: "PIN", value: PIN }, t);
+		expect(await accessType("e-dir-out")).toBe("EXIT");
+		expect(await accessType("e-dir-def")).toBe("ENTRY");
+	});
+
+	it("rejects unknown direction", async () => {
+		const res = await post("/api/v1/access/authorize", { event_id: "e-dir-bad", method: "PIN", value: PIN, direction: "exit" }, await token());
+		expect(res.status).toBe(400);
+	});
+});

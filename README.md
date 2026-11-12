@@ -82,7 +82,7 @@ npm test
 Header `Authorization: Bearer <JWT>`
 
 ```json
-{ "event_id": "evt-unique-id", "method": "ANPR", "value": "กก9999", "house_code": "9801" }
+{ "event_id": "evt-unique-id", "method": "ANPR", "value": "กก9999", "house_code": "9801", "direction": "ENTRY" }
 ```
 → `{ "event_id": "...", "decision": "YES|NO|ERROR", "house_number": "98/6", "reason_code": "...", "allowed_methods": ["RFID"], "policy_version": 1 }`
 
@@ -92,6 +92,7 @@ Header `Authorization: Bearer <JWT>`
 - `event_id` ซ้ำ → ได้คำตอบเดิม ไม่ตัดสินซ้ำ
 - `ERROR` ตอบ HTTP 500 และห้ามตีความเป็น `YES`
 - `house_code` ไม่บังคับ: ใช้ตรวจซ้ำว่า credential / ทะเบียนเป็นของบ้านนั้น ไม่ตรง → `NO` + `HOUSE_MISMATCH` รูปแบบผิด → 400
+- `direction` ไม่บังคับ: `ENTRY` / `EXIT` บันทึกลง `tb_access_log.access_type` (SEMA ตัวเดียวคุมทั้งฝั่งเข้า/ออก) ไม่ส่ง → ใช้ `tb_device.direction` ค่าอื่น → 400
 - บ้านที่ปิดใช้งาน (`tb_house.is_active = 0`): ลูกบ้านได้ `USER_INACTIVE`, Visitor ของบ้านนั้นได้ `VISITOR_NOT_VALID` (ทะเบียน = `UNKNOWN_PLATE`)
 
 `reason_code`: `RESIDENT_ACTIVE`, `RESIDENT_OVERDUE_ALLOWED`, `VISITOR_VALID`, `RESIDENT_OVERDUE`, `RESIDENT_OVERDUE_SEVERE`,
