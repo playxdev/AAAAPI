@@ -82,6 +82,7 @@ interface Owner {
 	house_id: string | null;
 	house_number: string | null;
 	house_code: string | null;
+	occupancy_status: string | null;
 }
 
 interface Ctx {
@@ -110,6 +111,7 @@ async function ownerListVisitors(c: Ctx) {
 // ออก Guest Code "<house_code>+xxxx" ใช้ได้ทั้ง QR และ Keypad
 async function ownerCreateVisitor(c: Ctx) {
 	const houseId = requireHouse(c.owner);
+	if (c.owner.occupancy_status === "VACANT") throw new HttpError(409, "HOUSE_VACANT");
 	if (!c.owner.house_code) throw new HttpError(409, "HOUSE_CODE_MISSING");
 	const result = await issueGuest(
 		c.env,
@@ -152,7 +154,7 @@ export async function handleOwner(req: Request, env: Env): Promise<Response> {
 	const owner =
 		claims &&
 		(await env.DB.prepare(
-			`SELECT u.user_id, u.project_id, u.full_name, u.house_id, h.house_number, h.house_code
+			`SELECT u.user_id, u.project_id, u.full_name, u.house_id, h.house_number, h.house_code, h.occupancy_status
 			 FROM tb_user u LEFT JOIN tb_house h ON h.house_id = u.house_id
 			 WHERE u.user_id = ? AND u.is_active = 1 AND u.line_user_id IS NOT NULL`,
 		)

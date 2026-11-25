@@ -18,15 +18,15 @@ async function login(name: string, password = PASSWORD) {
 	return call("POST", "/api/v1/admin/login", undefined, { admin_name: name, password });
 }
 
-async function authorize(method: string, value: string) {
+async function authorize(method: string, value: string, province?: string) {
 	const tok = await call("POST", "/api/v1/auth/device/token", undefined, { device_id: "DA", device_secret: DEVICE_SECRET });
-	return (await call("POST", "/api/v1/access/authorize", tok.body.access_token, { event_id: crypto.randomUUID(), method, value })).body;
+	return (await call("POST", "/api/v1/access/authorize", tok.body.access_token, { event_id: crypto.randomUUID(), method, value, province })).body;
 }
 
 beforeAll(async () => {
 	const hash = await hashPassword(PASSWORD);
 	const policy = [
-		["RESIDENT", "ANPR"], ["RESIDENT", "RFID"], ["RESIDENT", "PIN"],
+		["RESIDENT", "ANPR"], ["RESIDENT", "RFID"], ["RESIDENT", "PIN"], ["RESIDENT", "QRCODE"],
 		["RESIDENT_OVERDUE", "RFID"], ["RESIDENT_OVERDUE", "PIN"],
 	];
 	await env.DB.batch([
@@ -48,41 +48,61 @@ describe("admin auth", () => {
 	});
 
 	it("rejects missing token and device tokens", async () => {
-		expect((await call("GET", "/api/v1/admin/residents")).status).toBe(401);
+		expect((await call("GET", "/api/v1/admin/houses")).status).toBe(401);
 		const dev = await call("POST", "/api/v1/auth/device/token", undefined, { device_id: "DA", device_secret: DEVICE_SECRET });
-		expect((await call("GET", "/api/v1/admin/residents", dev.body.access_token)).status).toBe(401);
+		expect((await call("GET", "/api/v1/admin/houses", dev.body.access_token)).status).toBe(401);
 	});
 });
 
-describe("resident lifecycle", () => {
-	it("house -> resident -> vehicle -> credential, and the access API follows every change", async () => {
+describe("house lifecycle", () => {
+	it("house -> contact -> vehicle -> credential, and the access API follows every change", async () => {
 		const t = (await login("admin-a")).body.access_token;
 
 		const house = await call("POST", "/api/v1/admin/houses", t, { house_number: "99/1" });
 		expect(house.status).toBe(201);
-		const user = await call("POST", "/api/v1/admin/residents", t, { house_id: house.body.house_id, full_name: "สมชาย ใจดี" });
-		expect(user.status).toBe(201);
-		const uid = user.body.user_id;
+		const hid = house.body.house_id;
+		const owner = await call("POST", `/api/v1/admin/houses/${hid}/contacts`, t, { full_name: "สมชาย ใจดี", phone_number: "0812345678", role: "OWNER" });
+		expect(owner.status).toBe(201);
 
-		const car = await call("POST", `/api/v1/admin/residents/${uid}/vehicles`, t, { license_plate: "ฮฮ 1111" });
+		const car = await call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: "ฮฮ 1111" });
 		expect(car.body.license_plate).toBe("ฮฮ1111");
-		expect((await call("POST", `/api/v1/admin/residents/${uid}/vehicles`, t, { license_plate: "ฮฮ-1111" })).status).toBe(409);
+		expect((await call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: "ฮฮ-1111" })).status).toBe(409);
 		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "YES" });
 
-		const pin = await call("POST", `/api/v1/admin/residents/${uid}/credentials`, t, { cred_type: "PIN", value: "908172" });
+		const pin = await call("POST", `/api/v1/admin/houses/${hid}/credentials`, t, { cred_type: "PIN", value: "908172" });
 		expect(pin.status).toBe(201);
 		expect(await authorize("PIN", "908172")).toMatchObject({ decision: "YES" });
-		expect((await call("POST", `/api/v1/admin/residents/${uid}/credentials`, t, { cred_type: "PIN", value: "12" })).status).toBe(400);
+		expect((await call("POST", `/api/v1/admin/houses/${hid}/credentials`, t, { cred_type: "PIN", value: "12" })).status).toBe(400);
 
 		// ค้างชำระ -> ANPR ถูกปฏิเสธ
 		expect((await call("PATCH", `/api/v1/admin/houses/${house.body.house_id}`, t, { payment_status: "OVERDUE" })).status).toBe(200);
 		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "NO", reason_code: "RESIDENT_OVERDUE" });
 		expect((await call("PATCH", `/api/v1/admin/houses/${house.body.house_id}`, t, { payment_status: "LATE" })).status).toBe(400);
 
-		// รายละเอียดลูกบ้านไม่มี hash ของ credential
-		const detail = await call("GET", `/api/v1/admin/residents/${uid}`, t);
+		// รายละเอียดบ้านมีผู้ติดต่อ และไม่มี hash ของ credential
+		const detail = await call("GET", `/api/v1/admin/houses/${hid}`, t);
+		expect(detail.body.contacts).toMatchObject([{ full_name: "สมชาย ใจดี", role: "OWNER", line_linked: 0 }]);
 		expect(detail.body.vehicles).toHaveLength(1);
 		expect(detail.body.credentials[0]).toMatchObject({ cred_type: "PIN", id_status: "ACTIVE" });
+		// no valid_until -> 24 hours
+		const hours = (Date.parse(detail.body.credentials[0].valid_until.replace(" ", "T") + "Z") - Date.now()) / 3_600_000;
+		expect(hours).toBeGreaterThan(23.9);
+		expect(hours).toBeLessThanOrEqual(24);
+
+		// duration: forever = no expiry (NULL), 7d = 7 days; an explicit valid_until wins
+		const addPin = (body: Record<string, unknown>) =>
+			call("POST", `/api/v1/admin/houses/${hid}/credentials`, t, { cred_type: "PIN", ...body });
+		expect((await addPin({ value: "5551", duration: "forever" })).status).toBe(201);
+		expect((await addPin({ value: "5552", duration: "7d" })).status).toBe(201);
+		expect((await addPin({ value: "5553", duration: "7d", valid_until: "2030-01-01 00:00:00" })).status).toBe(201);
+		expect((await addPin({ value: "5554", duration: "2w" })).status).toBe(400);
+		const until = Object.fromEntries(
+			(await call("GET", `/api/v1/admin/houses/${hid}`, t)).body.credentials.map((c: any) => [c.credential_id, c.valid_until]),
+		);
+		const vals = Object.values(until);
+		expect(vals).toContain(null);
+		expect(vals).toContain("2030-01-01 00:00:00");
+		expect(vals.some((v: any) => v && Math.round((Date.parse(v.replace(" ", "T") + "Z") - Date.now()) / 86_400_000) === 7)).toBe(true);
 		expect(JSON.stringify(detail.body)).not.toContain("cred_hash");
 		expect(JSON.stringify(detail.body)).not.toContain("908172");
 
@@ -90,16 +110,91 @@ describe("resident lifecycle", () => {
 		await call("DELETE", `/api/v1/admin/credentials/${pin.body.credential_id}`, t);
 		expect(await authorize("PIN", "908172")).toMatchObject({ decision: "NO", reason_code: "CREDENTIAL_REVOKED" });
 
-		// ปิดลูกบ้าน -> เข้าไม่ได้ทุกวิธี
 		await call("PATCH", `/api/v1/admin/houses/${house.body.house_id}`, t, { payment_status: "NORMAL" });
-		expect((await call("DELETE", `/api/v1/admin/residents/${uid}`, t)).body.is_active).toBe(0);
-		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "NO", reason_code: "UNKNOWN_PLATE" });
+		// QRCODE: no value -> server generates one; a client value must be 20 chars of the code alphabet
+		const qrPost = (value?: string) => call("POST", `/api/v1/admin/houses/${hid}/credentials`, t, { cred_type: "QRCODE", value });
+		const qr = await qrPost();
+		expect(qr.status).toBe(201);
+		expect(qr.body.value).toMatch(/^[A-HJ-NP-Z2-9]{20}$/);
+		expect(await authorize("QRCODE", qr.body.value)).toMatchObject({ decision: "YES" });
+		const mine = "ABCDEFGHJKLMNPQRSTUV";
+		expect((await qrPost(mine)).body.value).toBe(mine);
+		expect(await authorize("QRCODE", mine)).toMatchObject({ decision: "YES" });
+		expect((await qrPost(mine)).status).toBe(409);
+		expect((await qrPost("MINE")).status).toBe(400);
+		expect((await qrPost("ABCDEFGHJKLMNPQRSTU1")).status).toBe(400); // 1 is not in the alphabet
+
+		// ลบผู้ติดต่อ ไม่กระทบสิทธิ์เข้าออกของบ้าน
+		expect((await call("DELETE", `/api/v1/admin/contacts/${owner.body.user_id}`, t)).body.is_active).toBe(0);
+		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "YES" });
+
+		// ไม่มีผู้อยู่อาศัย -> ทุกช่องทางของบ้านใช้ไม่ได้ และเพิ่มใหม่ไม่ได้
+		await call("PATCH", `/api/v1/admin/houses/${hid}`, t, { occupancy_status: "VACANT" });
+		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "NO", reason_code: "HOUSE_VACANT" });
+		expect(await authorize("QRCODE", mine)).toMatchObject({ decision: "NO", reason_code: "HOUSE_VACANT" });
+		expect((await call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: "ฮฮ 2222" })).body).toMatchObject({ error: "HOUSE_VACANT" });
+		expect((await call("PATCH", `/api/v1/admin/houses/${hid}`, t, { occupancy_status: "EMPTY" })).status).toBe(400);
+		await call("PATCH", `/api/v1/admin/houses/${hid}`, t, { occupancy_status: "OCCUPIED" });
+		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "YES" });
+
+		// ปิดบ้าน -> เข้าไม่ได้ทุกวิธี
+		await call("PATCH", `/api/v1/admin/houses/${hid}`, t, { is_active: false });
+		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "NO", reason_code: "USER_INACTIVE" });
 	});
 
-	it("validates required fields and unknown house", async () => {
+	it("registers every Thai plate format and ANPR matches it however it is spaced", async () => {
 		const t = (await login("admin-a")).body.access_token;
-		expect((await call("POST", "/api/v1/admin/residents", t, { full_name: "x" })).body).toMatchObject({ field: "house_id" });
-		expect((await call("POST", "/api/v1/admin/residents", t, { house_id: "nope", full_name: "x" })).status).toBe(404);
+		const house = await call("POST", "/api/v1/admin/houses", t, { house_number: "88/8" });
+		const hid = house.body.house_id;
+		// [typed by admin, stored, as the camera may read it]
+		const plates = [
+			["กข 1234", "กข1234", "กข1234"], // รย. old: 2 letters + 4 digits
+			["1กข 1234", "1กข1234", "1 กข 1234"], // รย. current: digit + 2 letters + 4 digits
+			["รวย 9999", "รวย9999", "รวย9999"], // special: 3 letters + 4 digits
+			["2กค 5678", "2กค5678", "2กค 5678"], // motorcycle: top line + bottom line (province is a separate field)
+			["70-1234", "701234", "70 1234"], // truck
+			["80-1234", "801234", "801234"], // bus
+			["จ 12", "จ12", "จ12"], // 1-letter category, short number
+		];
+		for (const [typed, stored, read] of plates) {
+			const v = await call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: typed });
+			expect(v.status, typed).toBe(201);
+			expect(v.body.license_plate).toBe(stored);
+			expect(await authorize("ANPR", read), read).toMatchObject({ decision: "YES" });
+		}
+		for (const bad of ["ABC123", "1234", "กข", "1กข 12345", "123-1234"]) {
+			expect((await call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: bad })).status, bad).toBe(400);
+		}
+		// Only one car has this plate: a wrong province from the camera's OCR does not lock the resident out
+		expect(await authorize("ANPR", "รวย9999", "ภูเก็ต")).toMatchObject({ decision: "YES" });
+
+		// Same plate, different provinces = different cars; province (with กทม aliases) tells them apart
+		const add = (province?: string) =>
+			call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: "9กก 9999", province });
+		expect((await add("กทม")).status).toBe(201);
+		expect((await add("เชียงใหม่")).status).toBe(201);
+		expect((await add("กรุงเทพมหานคร")).status).toBe(409);
+		expect((await add()).status).toBe(409);
+		expect(await authorize("ANPR", "9กก9999")).toMatchObject({ decision: "NO", reason_code: "PLATE_AMBIGUOUS" });
+		expect(await authorize("ANPR", "9กก9999", "เชียงใหม่")).toMatchObject({ decision: "YES" });
+		expect(await authorize("ANPR", "9กก9999", "กรุงเทพฯ")).toMatchObject({ decision: "YES" });
+		expect(await authorize("ANPR", "9กก9999", "ภูเก็ต")).toMatchObject({ decision: "NO", reason_code: "PLATE_AMBIGUOUS" });
+	});
+
+	it("validates contact fields and unknown house", async () => {
+		const t = (await login("admin-a")).body.access_token;
+		const hid = (await call("POST", "/api/v1/admin/houses", t, { house_number: "77/7" })).body.house_id;
+		expect((await call("POST", `/api/v1/admin/houses/${hid}/contacts`, t, {})).body).toMatchObject({ field: "full_name" });
+		expect((await call("POST", `/api/v1/admin/houses/${hid}/contacts`, t, { full_name: "x", role: "BOSS" })).status).toBe(400);
+		expect((await call("POST", "/api/v1/admin/houses/nope/contacts", t, { full_name: "x" })).status).toBe(404);
+		expect((await call("POST", "/api/v1/admin/houses/nope/vehicles", t, { license_plate: "กข 1" })).status).toBe(404);
+
+		// ผู้ติดต่อหลายคน เจ้าบ้านขึ้นก่อน; แก้บทบาทได้
+		const tenant = (await call("POST", `/api/v1/admin/houses/${hid}/contacts`, t, { full_name: "ผู้เช่า", role: "TENANT" })).body.user_id;
+		await call("POST", `/api/v1/admin/houses/${hid}/contacts`, t, { full_name: "เจ้าบ้าน", role: "OWNER" });
+		const listed = (await call("GET", "/api/v1/admin/houses", t)).body.houses.find((h: any) => h.house_id === hid);
+		expect(listed.contacts.map((c: any) => c.role)).toEqual(["OWNER", "TENANT"]);
+		expect((await call("PATCH", `/api/v1/admin/contacts/${tenant}`, t, { role: "RESIDENT" })).status).toBe(200);
 	});
 });
 
@@ -108,12 +203,15 @@ describe("project isolation", () => {
 		const ta = (await login("admin-a")).body.access_token;
 		const tb = (await login("admin-b")).body.access_token;
 		const house = await call("POST", "/api/v1/admin/houses", ta, { house_number: "1/1" });
-		const user = await call("POST", "/api/v1/admin/residents", ta, { house_id: house.body.house_id, full_name: "A only" });
+		const hid = house.body.house_id;
+		const user = await call("POST", `/api/v1/admin/houses/${hid}/contacts`, ta, { full_name: "A only" });
 
-		expect((await call("GET", `/api/v1/admin/residents/${user.body.user_id}`, tb)).status).toBe(404);
-		expect((await call("PATCH", `/api/v1/admin/houses/${house.body.house_id}`, tb, { payment_status: "OVERDUE" })).status).toBe(404);
-		expect((await call("DELETE", `/api/v1/admin/residents/${user.body.user_id}`, tb)).status).toBe(404);
-		expect((await call("POST", "/api/v1/admin/residents", tb, { house_id: house.body.house_id, full_name: "x" })).status).toBe(404);
-		expect((await call("GET", "/api/v1/admin/residents", tb)).body.residents).toHaveLength(0);
+		expect((await call("GET", `/api/v1/admin/houses/${hid}`, tb)).status).toBe(404);
+		expect((await call("PATCH", `/api/v1/admin/houses/${hid}`, tb, { payment_status: "OVERDUE" })).status).toBe(404);
+		expect((await call("PATCH", `/api/v1/admin/contacts/${user.body.user_id}`, tb, { full_name: "x" })).status).toBe(404);
+		expect((await call("DELETE", `/api/v1/admin/contacts/${user.body.user_id}`, tb)).status).toBe(404);
+		expect((await call("POST", `/api/v1/admin/houses/${hid}/contacts`, tb, { full_name: "x" })).status).toBe(404);
+		expect((await call("POST", `/api/v1/admin/houses/${hid}/credentials`, tb, { cred_type: "PIN", value: "4321" })).status).toBe(404);
+		expect((await call("GET", "/api/v1/admin/houses", tb)).body.houses).toHaveLength(0);
 	});
 });

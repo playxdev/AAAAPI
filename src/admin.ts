@@ -1,7 +1,7 @@
 import { auditTarget, writeAudit } from "./audit";
-import { credentialHash, normalizePlate, type Method } from "./authorize";
+import { credentialHash, normalizePlate, normalizeProvince, type Method } from "./authorize";
 import { JWT_ISS, sha256Hex, signJwt, verifyJwt, verifyPassword } from "./crypto";
-import { COMMON_AREA_PREFIX, HOUSE_CODE_RE, issueGuest, listVisitors, revokeVisitor } from "./guest";
+import { COMMON_AREA_PREFIX, DURATION_DAYS, HOUSE_CODE_RE, issueGuest, listVisitors, revokeVisitor } from "./guest";
 import {
 	badField,
 	type Body,
@@ -70,20 +70,65 @@ async function requireRow(c: Ctx, table: string, idCol: string, id: string) {
 }
 
 // ---------- Houses ----------
+// สิทธิ์เข้าออก (รถ / RFID / PIN / QR) เป็นของบ้าน; tb_user = ผู้ติดต่อของบ้าน + บัญชี LINE
 
-const HOUSE_COLS = "house_id, house_number, house_code, zone_or_soi, payment_status, is_active, update_date";
+const HOUSE_COLS = "house_id, house_number, house_code, zone_or_soi, payment_status, occupancy_status, is_active, update_date";
+const OCCUPANCY = ["OCCUPIED", "VACANT"];
+const CONTACT_ROLES = ["OWNER", "RESIDENT", "TENANT"];
+const CONTACT_COLS = "user_id, house_id, full_name, phone_number, role, line_user_id IS NOT NULL AS line_linked";
+// เจ้าบ้านขึ้นก่อน (= ผู้ติดต่อหลัก) แล้วตามลำดับที่เพิ่ม
+const CONTACT_ORDER = "CASE role WHEN 'OWNER' THEN 0 WHEN 'TENANT' THEN 1 ELSE 2 END, autoID";
 
 async function listHouses(c: Ctx) {
-	const { results } = await c.env.DB.prepare(`SELECT ${HOUSE_COLS} FROM tb_house WHERE project_id = ? ORDER BY house_number`)
-		.bind(c.pid)
-		.all();
-	return json({ houses: results });
+	const db = c.env.DB;
+	const [houses, contacts] = await db.batch<Record<string, unknown>>([
+		db.prepare(`SELECT ${HOUSE_COLS} FROM tb_house WHERE project_id = ? ORDER BY house_number`).bind(c.pid),
+		db.prepare(`SELECT ${CONTACT_COLS} FROM tb_user WHERE project_id = ? AND is_active = 1 ORDER BY ${CONTACT_ORDER}`).bind(c.pid),
+	]);
+	const byHouse = new Map<unknown, unknown[]>();
+	for (const ct of contacts.results) byHouse.set(ct.house_id, [...(byHouse.get(ct.house_id) ?? []), ct]);
+	return json({ houses: houses.results.map((h) => ({ ...h, contacts: byHouse.get(h.house_id) ?? [] })) });
+}
+
+async function getHouse(c: Ctx) {
+	const db = c.env.DB;
+	const [house, contacts, vehicles, credentials] = await db.batch([
+		db.prepare(`SELECT ${HOUSE_COLS} FROM tb_house WHERE house_id = ? AND project_id = ?`).bind(c.id, c.pid),
+		db.prepare(`SELECT ${CONTACT_COLS} FROM tb_user WHERE house_id = ? AND project_id = ? AND is_active = 1 ORDER BY ${CONTACT_ORDER}`).bind(
+			c.id,
+			c.pid,
+		),
+		db.prepare(
+			"SELECT vehicle_id, license_plate, province, brand, color, is_active FROM tb_vehicle WHERE house_id = ? AND project_id = ?",
+		).bind(c.id, c.pid),
+		// ห้ามคืน cred_hash
+		db.prepare(
+			`SELECT credential_id, cred_type, valid_from, valid_until, max_uses, use_count, is_active, id_status
+			 FROM tb_credential WHERE house_id = ? AND project_id = ?`,
+		).bind(c.id, c.pid),
+	]);
+	if (house.results.length === 0) throw notFound();
+	return json({
+		...(house.results[0] as Record<string, unknown>),
+		contacts: contacts.results,
+		vehicles: vehicles.results,
+		credentials: credentials.results,
+	});
 }
 
 async function createHouse(c: Ctx) {
 	const houseId = crypto.randomUUID();
-	await c.env.DB.prepare("INSERT INTO tb_house (house_id, project_id, house_number, house_code, zone_or_soi) VALUES (?, ?, ?, ?, ?)")
-		.bind(houseId, c.pid, reqStr(c.body, "house_number", 32), optHouseCode(c.body) ?? null, optStr(c.body, "zone_or_soi", 64) ?? null)
+	await c.env.DB.prepare(
+		"INSERT INTO tb_house (house_id, project_id, house_number, house_code, zone_or_soi, occupancy_status) VALUES (?, ?, ?, ?, ?, ?)",
+	)
+		.bind(
+			houseId,
+			c.pid,
+			reqStr(c.body, "house_number", 32),
+			optHouseCode(c.body) ?? null,
+			optStr(c.body, "zone_or_soi", 64) ?? null,
+			optEnum(c.body, "occupancy_status", OCCUPANCY) ?? "OCCUPIED",
+		)
 		.run();
 	return json({ house_id: houseId }, 201);
 }
@@ -94,74 +139,51 @@ async function updateHouse(c: Ctx) {
 		house_code: optHouseCode(c.body),
 		zone_or_soi: optStr(c.body, "zone_or_soi", 64),
 		payment_status: optEnum(c.body, "payment_status", PAYMENT_STATUSES),
+		occupancy_status: optEnum(c.body, "occupancy_status", OCCUPANCY),
 		is_active: optActive(c.body),
 	});
 	return json({ house_id: c.id });
 }
 
-// ---------- Residents ----------
-
-const RESIDENT_COLS = "user_id, house_id, full_name, phone_number, line_id, role, is_active, update_date";
-
-async function listResidents(c: Ctx) {
-	const houseId = c.url.searchParams.get("house_id");
-	const stmt = houseId
-		? c.env.DB.prepare(`SELECT ${RESIDENT_COLS} FROM tb_user WHERE project_id = ? AND house_id = ? ORDER BY full_name`).bind(c.pid, houseId)
-		: c.env.DB.prepare(`SELECT ${RESIDENT_COLS} FROM tb_user WHERE project_id = ? ORDER BY full_name`).bind(c.pid);
-	return json({ residents: (await stmt.all()).results });
+// บ้านต้องมีอยู่ และไม่ใช่ "ไม่มีผู้อยู่อาศัย" ถึงจะเพิ่มช่องทางเข้าออก / ผู้เยี่ยมชมได้
+async function requireOccupiedHouse(c: Ctx, houseId: string) {
+	const house = await c.env.DB.prepare("SELECT occupancy_status, house_code FROM tb_house WHERE house_id = ? AND project_id = ?")
+		.bind(houseId, c.pid)
+		.first<{ occupancy_status: string | null; house_code: string | null }>();
+	if (!house) throw notFound();
+	if (house.occupancy_status === "VACANT") throw new HttpError(409, "HOUSE_VACANT", "house_id");
+	return house;
 }
 
-async function getResident(c: Ctx) {
-	const db = c.env.DB;
-	const [resident, vehicles, credentials] = await db.batch([
-		db.prepare(`SELECT ${RESIDENT_COLS} FROM tb_user WHERE user_id = ? AND project_id = ?`).bind(c.id, c.pid),
-		db.prepare(
-			"SELECT vehicle_id, license_plate, province, brand, color, is_active FROM tb_vehicle WHERE user_id = ? AND project_id = ?",
-		).bind(c.id, c.pid),
-		// ห้ามคืน cred_hash
-		db.prepare(
-			`SELECT credential_id, cred_type, valid_from, valid_until, max_uses, use_count, is_active, id_status
-			 FROM tb_credential WHERE user_id = ? AND project_id = ?`,
-		).bind(c.id, c.pid),
-	]);
-	if (resident.results.length === 0) throw notFound();
-	return json({ ...(resident.results[0] as Record<string, unknown>), vehicles: vehicles.results, credentials: credentials.results });
-}
+// ---------- Contacts (tb_user) ----------
 
-async function createResident(c: Ctx) {
-	const houseId = reqStr(c.body, "house_id", 64);
-	await requireRow(c, "tb_house", "house_id", houseId);
+async function addContact(c: Ctx) {
+	await requireRow(c, "tb_house", "house_id", c.id);
 	const userId = crypto.randomUUID();
-	await c.env.DB.prepare(
-		"INSERT INTO tb_user (user_id, project_id, house_id, full_name, phone_number, line_id) VALUES (?, ?, ?, ?, ?, ?)",
-	)
+	await c.env.DB.prepare("INSERT INTO tb_user (user_id, project_id, house_id, full_name, phone_number, role) VALUES (?, ?, ?, ?, ?, ?)")
 		.bind(
 			userId,
 			c.pid,
-			houseId,
+			c.id,
 			reqStr(c.body, "full_name", 128),
 			optStr(c.body, "phone_number", 32) ?? null,
-			optStr(c.body, "line_id", 64) ?? null,
+			optEnum(c.body, "role", CONTACT_ROLES) ?? "RESIDENT",
 		)
 		.run();
 	return json({ user_id: userId }, 201);
 }
 
-async function updateResident(c: Ctx) {
-	const houseId = c.body.house_id === undefined ? undefined : reqStr(c.body, "house_id", 64);
-	if (houseId) await requireRow(c, "tb_house", "house_id", houseId);
+async function updateContact(c: Ctx) {
 	await patchRow(c, "tb_user", "user_id", {
-		house_id: houseId,
 		full_name: c.body.full_name === undefined ? undefined : reqStr(c.body, "full_name", 128),
 		phone_number: optStr(c.body, "phone_number", 32),
-		line_id: optStr(c.body, "line_id", 64),
-		is_active: optActive(c.body),
+		role: optEnum(c.body, "role", CONTACT_ROLES),
 	});
 	return json({ user_id: c.id });
 }
 
-// Soft delete: เก็บข้อมูลไว้ให้ access log อ้างอิงได้ ลูกบ้านที่ inactive จะเข้าไม่ได้ทุกวิธี
-async function deactivateResident(c: Ctx) {
+// Soft delete: audit / visitor ที่เขาออกยังอ้างอิงได้; บัญชี LINE ของเขาใช้ไม่ได้ทันที
+async function removeContact(c: Ctx) {
 	await patchRow(c, "tb_user", "user_id", { is_active: 0 });
 	return json({ user_id: c.id, is_active: 0 });
 }
@@ -169,26 +191,29 @@ async function deactivateResident(c: Ctx) {
 // ---------- Vehicles ----------
 
 async function addVehicle(c: Ctx) {
-	await requireRow(c, "tb_user", "user_id", c.id);
+	await requireOccupiedHouse(c, c.id);
 	const plate = normalizePlate(reqStr(c.body, "license_plate", 32));
-	if (!plate) throw badField("license_plate");
+	// หมวด (1กข / กข / รวย / 70) + เลข 1-4 หลัก; จังหวัดอยู่อีกช่อง
+	if (!PLATE_RE.test(plate)) throw badField("license_plate");
+	const province = normalizeProvince(optStr(c.body, "province", 64));
+	// ป้ายเดียวกันต่างจังหวัด = คนละคัน; ไม่ระบุจังหวัด = ชนกับทุกจังหวัด
 	const dup = await c.env.DB.prepare(
-		"SELECT 1 FROM tb_vehicle WHERE project_id = ? AND license_plate = ? AND is_active = 1",
+		"SELECT 1 FROM tb_vehicle WHERE project_id = ? AND license_plate = ? AND is_active = 1 AND (? IS NULL OR province IS NULL OR province = ?)",
 	)
-		.bind(c.pid, plate)
+		.bind(c.pid, plate, province, province)
 		.first();
 	if (dup) throw new HttpError(409, "PLATE_EXISTS", "license_plate");
 
 	const vehicleId = crypto.randomUUID();
 	await c.env.DB.prepare(
-		"INSERT INTO tb_vehicle (vehicle_id, project_id, user_id, license_plate, province, brand, color) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO tb_vehicle (vehicle_id, project_id, house_id, license_plate, province, brand, color) VALUES (?, ?, ?, ?, ?, ?, ?)",
 	)
 		.bind(
 			vehicleId,
 			c.pid,
 			c.id,
 			plate,
-			optStr(c.body, "province", 64) ?? null,
+			province,
 			optStr(c.body, "brand", 64) ?? null,
 			optStr(c.body, "color", 32) ?? null,
 		)
@@ -204,10 +229,13 @@ async function removeVehicle(c: Ctx) {
 // ---------- Credentials ----------
 
 async function addCredential(c: Ctx) {
-	await requireRow(c, "tb_user", "user_id", c.id);
+	await requireOccupiedHouse(c, c.id);
 	const credType = optEnum(c.body, "cred_type", ADMIN_CRED_TYPES) as Method | undefined;
 	if (!credType) throw badField("cred_type");
-	const value = reqStr(c.body, "value", 256);
+	// QRCODE: 20 chars of LINK_CODE_ALPHABET (100 bits). Admin UI generates it so the admin sees it before saving;
+	// no value = server generates. Returned once in the response; DB keeps only the hash.
+	const value = credType === "QRCODE" ? (optStr(c.body, "value", 20) ?? randomCode(20)) : reqStr(c.body, "value", 256);
+	if (credType === "QRCODE" && !QR_RE.test(value)) throw badField("value");
 	if (credType === "PIN" && !/^\d{4,8}$/.test(value)) throw badField("value");
 	// PIN ห้ามชนกับ Guest Code เพราะ Keypad ส่งมาเป็น method PIN เหมือนกัน
 	if (credType === "PIN") {
@@ -217,10 +245,17 @@ async function addCredential(c: Ctx) {
 		if (guestClash) throw new HttpError(409, "CREDENTIAL_EXISTS", "value");
 	}
 
+	// วันหมดอายุ: valid_until (กำหนดเอง) > duration (forever = ไม่มีกำหนด / NULL) > ไม่ระบุ = 24 ชั่วโมง
+	const duration = optEnum(c.body, "duration", Object.keys(DURATION_DAYS));
+	const days = DURATION_DAYS[duration ?? "1d"];
+	const validUntil =
+		optDate(c.body, "valid_until") ??
+		(duration === "forever" ? null : new Date(Date.now() + days * 86_400_000).toISOString().replace("T", " ").slice(0, 19));
+
 	const credentialId = crypto.randomUUID();
 	try {
 		await c.env.DB.prepare(
-			`INSERT INTO tb_credential (credential_id, project_id, user_id, cred_type, cred_hash, valid_from, valid_until)
+			`INSERT INTO tb_credential (credential_id, project_id, house_id, cred_type, cred_hash, valid_from, valid_until)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		)
 			.bind(
@@ -230,14 +265,14 @@ async function addCredential(c: Ctx) {
 				credType,
 				await credentialHash(c.env.CRED_PEPPER, c.pid, credType, value),
 				optDate(c.body, "valid_from") ?? null,
-				optDate(c.body, "valid_until") ?? null,
+				validUntil,
 			)
 			.run();
 	} catch (err) {
 		if (isUniqueViolation(err)) throw new HttpError(409, "CREDENTIAL_EXISTS", "value");
 		throw err;
 	}
-	return json({ credential_id: credentialId, cred_type: credType }, 201);
+	return json({ credential_id: credentialId, cred_type: credType, ...(credType === "QRCODE" && { value }) }, 201);
 }
 
 async function revokeCredential(c: Ctx) {
@@ -247,12 +282,18 @@ async function revokeCredential(c: Ctx) {
 
 // ---------- LINE link code ----------
 
+// truck/bus: 2-digit category + exactly 4 digits, otherwise a pure number like "1234" would pass
+const PLATE_RE = /^(\d?[ก-ฮ]{1,3}\d{1,4}|\d{6})$/;
+const QR_RE = /^[A-HJ-NP-Z2-9]{20}$/;
 const LINK_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+// 32 symbols, so b % 32 has no modulo bias.
+const randomCode = (len: number) =>
+	[...crypto.getRandomValues(new Uint8Array(len))].map((b) => LINK_CODE_ALPHABET[b % 32]).join("");
 const LINK_CODE_TTL = "+1 day";
 
-// รหัสครั้งเดียวให้ลูกบ้านกรอกใน LIFF เพื่อผูกบัญชี LINE กับ tb_user
+// รหัสครั้งเดียวให้ผู้ติดต่อของบ้านกรอกใน LIFF เพื่อผูกบัญชี LINE กับ tb_user
 async function createLinkCode(c: Ctx) {
-	const code = [...crypto.getRandomValues(new Uint8Array(8))].map((b) => LINK_CODE_ALPHABET[b % 32]).join("");
+	const code = randomCode(8);
 	const res = await c.env.DB.prepare(
 		`UPDATE tb_user SET link_code_hash = ?, link_code_expires = datetime('now', ?)
 		 WHERE user_id = ? AND project_id = ? AND is_active = 1`,
@@ -276,10 +317,7 @@ async function adminCreateVisitor(c: Ctx) {
 	const houseId = optStr(c.body, "house_id", 64) ?? null;
 	let prefix = COMMON_AREA_PREFIX;
 	if (houseId) {
-		const house = await c.env.DB.prepare("SELECT house_code FROM tb_house WHERE house_id = ? AND project_id = ?")
-			.bind(houseId, c.pid)
-			.first<{ house_code: string | null }>();
-		if (!house) throw notFound();
+		const house = await requireOccupiedHouse(c, houseId);
 		if (!house.house_code) throw new HttpError(409, "HOUSE_CODE_MISSING", "house_id");
 		prefix = house.house_code;
 	}
@@ -304,16 +342,15 @@ const ROUTES = [
 	route("GET", "/houses", listHouses),
 	route("POST", "/houses", createHouse),
 	route("PATCH", "/houses/:id", updateHouse),
-	route("GET", "/residents", listResidents),
-	route("POST", "/residents", createResident),
-	route("GET", "/residents/:id", getResident),
-	route("PATCH", "/residents/:id", updateResident),
-	route("DELETE", "/residents/:id", deactivateResident),
-	route("POST", "/residents/:id/vehicles", addVehicle),
+	route("GET", "/houses/:id", getHouse),
+	route("POST", "/houses/:id/contacts", addContact),
+	route("PATCH", "/contacts/:id", updateContact),
+	route("DELETE", "/contacts/:id", removeContact),
+	route("POST", "/contacts/:id/link-code", createLinkCode),
+	route("POST", "/houses/:id/vehicles", addVehicle),
 	route("DELETE", "/vehicles/:id", removeVehicle),
-	route("POST", "/residents/:id/credentials", addCredential),
+	route("POST", "/houses/:id/credentials", addCredential),
 	route("DELETE", "/credentials/:id", revokeCredential),
-	route("POST", "/residents/:id/link-code", createLinkCode),
 	route("GET", "/visitors", adminListVisitors),
 	route("POST", "/visitors", adminCreateVisitor),
 	route("DELETE", "/visitors/:id", adminRevokeVisitor),

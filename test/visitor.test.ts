@@ -64,13 +64,13 @@ beforeAll(async () => {
 	ids.house = (await call("POST", "/api/v1/admin/houses", admin, { house_number: "98/1", house_code: "9801" })).body.house_id;
 	ids.house2 = (await call("POST", "/api/v1/admin/houses", admin, { house_number: "98/2", house_code: "9802" })).body.house_id;
 	ids.noCode = (await call("POST", "/api/v1/admin/houses", admin, { house_number: "98/3" })).body.house_id;
-	ids.owner = (await call("POST", "/api/v1/admin/residents", admin, { house_id: ids.house, full_name: "Owner 1" })).body.user_id;
-	ids.owner2 = (await call("POST", "/api/v1/admin/residents", admin, { house_id: ids.house2, full_name: "Owner 2" })).body.user_id;
-	ids.owner3 = (await call("POST", "/api/v1/admin/residents", admin, { house_id: ids.noCode, full_name: "Owner 3" })).body.user_id;
+	ids.owner = (await call("POST", `/api/v1/admin/houses/${ids.house}/contacts`, admin, { full_name: "Owner 1" })).body.user_id;
+	ids.owner2 = (await call("POST", `/api/v1/admin/houses/${ids.house2}/contacts`, admin, { full_name: "Owner 2" })).body.user_id;
+	ids.owner3 = (await call("POST", `/api/v1/admin/houses/${ids.noCode}/contacts`, admin, { full_name: "Owner 3" })).body.user_id;
 });
 
 async function linkOwner(userId: string, lineSub: string) {
-	const code = (await call("POST", `/api/v1/admin/residents/${userId}/link-code`, admin)).body.link_code;
+	const code = (await call("POST", `/api/v1/admin/contacts/${userId}/link-code`, admin)).body.link_code;
 	return call("POST", "/api/v1/owner/link", undefined, { id_token: `line:${lineSub}`, link_code: code });
 }
 
@@ -170,9 +170,19 @@ describe("guest codes", () => {
 		expect(all.some((v: any) => v.house_id === null && v.purpose === "งานส่วนกลาง")).toBe(true);
 	});
 
+	it("a vacant house cannot issue guest codes, and its existing codes stop working", async () => {
+		const g = await call("POST", "/api/v1/owner/visitors", owner2, { duration: "1d" });
+		await call("PATCH", `/api/v1/admin/houses/${ids.house2}`, admin, { occupancy_status: "VACANT" });
+		expect(await gate("QRCODE", g.body.code)).toMatchObject({ decision: "NO", reason_code: "HOUSE_VACANT" });
+		expect((await call("POST", "/api/v1/owner/visitors", owner2, { duration: "1d" })).body.error).toBe("HOUSE_VACANT");
+		expect((await call("POST", "/api/v1/admin/visitors", admin, { duration: "1d", house_id: ids.house2 })).body.error).toBe("HOUSE_VACANT");
+		await call("PATCH", `/api/v1/admin/houses/${ids.house2}`, admin, { occupancy_status: "OCCUPIED" });
+		expect(await gate("QRCODE", g.body.code)).toMatchObject({ decision: "YES" });
+	});
+
 	it("resident PIN cannot equal an active guest code", async () => {
 		const g = await call("POST", "/api/v1/owner/visitors", owner, { duration: "1d" });
-		const res = await call("POST", `/api/v1/admin/residents/${ids.owner}/credentials`, admin, {
+		const res = await call("POST", `/api/v1/admin/houses/${ids.house}/credentials`, admin, {
 			cred_type: "PIN",
 			value: g.body.code.replace("+", ""),
 		});
@@ -187,7 +197,7 @@ describe("audit and abuse protection", () => {
 		expect(actions).toContain("OWNER POST /api/v1/owner/visitors");
 		expect(actions).toContain("OWNER DELETE /api/v1/owner/visitors/:id");
 		expect(actions).toContain("OWNER LINK_LINE");
-		expect(actions).toContain("ADMIN POST /api/v1/admin/residents/:id/link-code");
+		expect(actions).toContain("ADMIN POST /api/v1/admin/contacts/:id/link-code");
 		expect(actions).toContain("ADMIN LOGIN");
 		expect(results.every((r) => !String(r.detail).includes("value") && !String(r.detail).includes("id_token"))).toBe(true);
 	});

@@ -33,6 +33,13 @@ const residentSubject = (paymentStatus: string | null): Subject =>
 // ทะเบียนที่เก็บใน tb_vehicle / tb_visitor / tb_blacklist ต้อง normalize แบบเดียวกัน
 export const normalizePlate = (plate: string) => plate.replace(/[\s-]/g, "").toUpperCase();
 
+// ป้ายไทยซ้ำกันได้ข้ามจังหวัด: เก็บ/เทียบจังหวัดแบบตัดช่องว่าง และรวมชื่อย่อของกรุงเทพฯ
+const PROVINCE_ALIASES: Record<string, string> = { กทม: "กรุงเทพมหานคร", "กทม.": "กรุงเทพมหานคร", กรุงเทพ: "กรุงเทพมหานคร", กรุงเทพฯ: "กรุงเทพมหานคร" };
+export const normalizeProvince = (province: string | undefined | null) => {
+	const p = province?.replace(/\s/g, "");
+	return p ? (PROVINCE_ALIASES[p] ?? p) : null;
+};
+
 // ค่าเดียวกันนี้ต้องใช้ตอนลงทะเบียน credential ใน tb_credential.cred_hash
 export const credentialHash = (pepper: string, projectId: string, credType: CredType, value: string) =>
 	hmacHex(pepper, `${projectId}:${credType}:${value}`);
@@ -44,10 +51,10 @@ export function guestDigits(value: string): string | null {
 }
 
 // houseCode จาก SEMA ใช้ตรวจซ้ำเท่านั้น: credential ต้องเป็นของบ้านนั้น ไม่ใช้ตัดสินสิทธิ์
-export async function decide(env: Env, projectId: string, method: Method, value: string, houseCode?: string): Promise<Decision> {
+export async function decide(env: Env, projectId: string, method: Method, value: string, houseCode?: string, province?: string): Promise<Decision> {
 	const who =
 		method === "ANPR"
-			? await identifyPlate(env.DB, projectId, normalizePlate(value))
+			? await identifyPlate(env.DB, projectId, normalizePlate(value), normalizeProvince(province))
 			: await identifyCredential(env, projectId, method, value);
 	if ("reason" in who) return { decision: "NO", reason_code: who.reason, allowed_methods: [] };
 	if (houseCode !== undefined && who.houseCode !== houseCode) return { decision: "NO", reason_code: "HOUSE_MISMATCH", allowed_methods: [] };
@@ -64,32 +71,32 @@ export async function decide(env: Env, projectId: string, method: Method, value:
 	return { ...base, decision: "YES", reason_code: YES_REASON[who.subject], house_number: who.houseNumber };
 }
 
-async function identifyPlate(db: D1Database, projectId: string, plate: string): Promise<Identity> {
+async function identifyPlate(db: D1Database, projectId: string, plate: string, province: string | null): Promise<Identity> {
 	const blacklisted = await db
 		.prepare("SELECT 1 FROM tb_blacklist WHERE project_id = ? AND license_plate = ? AND is_active = 1 LIMIT 1")
 		.bind(projectId, plate)
 		.first();
 	if (blacklisted) return { reason: "BLACKLISTED" };
 
-	const resident = await db
+	const { results: residents } = await db
 		.prepare(
-			`SELECT h.payment_status, h.house_code, h.house_number, h.is_active AS house_active FROM tb_vehicle v
-			 JOIN tb_user u ON u.user_id = v.user_id
-			 LEFT JOIN tb_house h ON h.house_id = u.house_id
-			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1 AND u.is_active = 1
-			 LIMIT 1`,
+			`SELECT v.province, h.payment_status, h.house_code, h.house_number, h.is_active AS house_active, h.occupancy_status
+			 FROM tb_vehicle v JOIN tb_house h ON h.house_id = v.house_id
+			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1`,
 		)
 		.bind(projectId, plate)
-		.first<{ payment_status: string | null; house_code: string | null; house_number: string | null; house_active: number | null }>();
-	// บ้านที่ปิดใช้งาน = ลูกบ้านทุกคนในบ้านนั้นเข้าไม่ได้
-	if (resident?.house_active === 0) return { reason: "USER_INACTIVE" };
-	if (resident) return { subject: residentSubject(resident.payment_status), houseCode: resident.house_code, houseNumber: resident.house_number };
+		.all<HouseRow & { province: string | null }>();
+	// ป้ายเดียว = ใช้เลย (ไม่พึ่ง OCR จังหวัดที่อาจอ่านผิด); ป้ายซ้ำต่างจังหวัด = ใช้จังหวัดจากกล้องเลือก
+	const resident = residents.length <= 1 ? residents[0] : residents.find((r) => province && r.province === province);
+	if (residents.length > 1 && !resident) return { reason: "PLATE_AMBIGUOUS" };
+	if (resident) return houseIdentity(resident);
 
 	const visitor = await db
 		.prepare(
 			`SELECT h.house_code, h.house_number FROM tb_visitor v
 			 LEFT JOIN tb_house h ON h.house_id = v.house_id
-			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1 AND (v.house_id IS NULL OR h.is_active = 1)
+			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1
+			   AND (v.house_id IS NULL OR (h.is_active = 1 AND COALESCE(h.occupancy_status, 'OCCUPIED') <> 'VACANT'))
 			   AND datetime('now') BETWEEN datetime(v.valid_from) AND datetime(v.valid_until)
 			 LIMIT 1`,
 		)
@@ -100,34 +107,43 @@ async function identifyPlate(db: D1Database, projectId: string, plate: string): 
 	return { reason: "UNKNOWN_PLATE" };
 }
 
-interface CredentialRow {
+interface HouseRow {
+	payment_status: string | null;
+	house_code: string | null;
+	house_number: string | null;
+	house_active: number | null;
+	occupancy_status: string | null;
+}
+
+// บ้านที่ปิดใช้งาน / ไม่มีผู้อยู่อาศัย = ทุกช่องทางของบ้านนั้นใช้ไม่ได้
+function houseIdentity(h: HouseRow, credentialId?: string): Identity {
+	if (h.house_active === 0) return { reason: "USER_INACTIVE" };
+	if (h.occupancy_status === "VACANT") return { reason: "HOUSE_VACANT" };
+	return { subject: residentSubject(h.payment_status), credentialId, houseCode: h.house_code, houseNumber: h.house_number };
+}
+
+interface CredentialRow extends HouseRow {
 	credential_id: string;
-	user_id: string | null;
+	house_id: string | null;
 	is_active: number;
 	id_status: string;
 	max_uses: number | null;
 	use_count: number;
 	started: number;
 	not_expired: number;
-	user_active: number | null;
-	house_active: number | null;
-	payment_status: string | null;
-	house_code: string | null;
-	house_number: string | null;
 	visitor_valid: number;
 }
 
 const findCredential = async (env: Env, projectId: string, credType: CredType, value: string) =>
 	env.DB.prepare(
-		`SELECT c.credential_id, c.user_id, c.is_active, c.id_status, c.max_uses, c.use_count,
+		`SELECT c.credential_id, c.house_id, c.is_active, c.id_status, c.max_uses, c.use_count,
 		   (c.valid_from IS NULL OR datetime(c.valid_from) <= datetime('now')) AS started,
 		   (c.valid_until IS NULL OR datetime(c.valid_until) >= datetime('now')) AS not_expired,
-		   u.is_active AS user_active, COALESCE(h.is_active, vh.is_active) AS house_active, h.payment_status, COALESCE(h.house_code, vh.house_code) AS house_code,
-		   COALESCE(h.house_number, vh.house_number) AS house_number,
+		   COALESCE(h.is_active, vh.is_active) AS house_active, h.payment_status, COALESCE(h.house_code, vh.house_code) AS house_code,
+		   COALESCE(h.house_number, vh.house_number) AS house_number, COALESCE(h.occupancy_status, vh.occupancy_status) AS occupancy_status,
 		   (vis.is_active = 1 AND datetime('now') BETWEEN datetime(vis.valid_from) AND datetime(vis.valid_until)) AS visitor_valid
 		 FROM tb_credential c
-		 LEFT JOIN tb_user u ON u.user_id = c.user_id
-		 LEFT JOIN tb_house h ON h.house_id = u.house_id
+		 LEFT JOIN tb_house h ON h.house_id = c.house_id
 		 LEFT JOIN tb_visitor vis ON vis.visitor_id = c.visitor_id
 		 LEFT JOIN tb_house vh ON vh.house_id = vis.house_id
 		 WHERE c.project_id = ? AND c.cred_type = ? AND c.cred_hash = ?`,
@@ -146,10 +162,8 @@ async function identifyCredential(env: Env, projectId: string, method: Method, v
 	if (!c.not_expired) return { reason: "CREDENTIAL_EXPIRED" };
 	if (c.max_uses !== null && c.use_count >= c.max_uses) return { reason: "CREDENTIAL_USED_UP" };
 
-	if (c.user_id) {
-		if (c.user_active !== 1 || c.house_active === 0) return { reason: "USER_INACTIVE" };
-		return { subject: residentSubject(c.payment_status), credentialId: c.credential_id, houseCode: c.house_code, houseNumber: c.house_number };
-	}
+	if (c.house_id) return houseIdentity(c, c.credential_id);
+	if (c.occupancy_status === "VACANT") return { reason: "HOUSE_VACANT" };
 	if (!c.visitor_valid || c.house_active === 0) return { reason: "VISITOR_NOT_VALID" };
 	return { subject: "VISITOR", credentialId: c.credential_id, houseCode: c.house_code, houseNumber: c.house_number };
 }

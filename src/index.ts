@@ -82,10 +82,12 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 	const method = body?.method as Method;
 	const houseCode = body?.house_code;
 	const direction = body?.direction;
+	const province = body?.province;
 	if (
 		!isStr(body?.event_id, 128) || !METHODS.includes(method) || !isStr(body?.value, 256) ||
 		(houseCode !== undefined && !(typeof houseCode === "string" && HOUSE_CODE_RE.test(houseCode))) ||
-		(direction !== undefined && !DIRECTIONS.includes(direction as string))
+		(direction !== undefined && !DIRECTIONS.includes(direction as string)) ||
+		(province !== undefined && !isStr(province, 64))
 	) {
 		return json({ error: "BAD_REQUEST" }, 400);
 	}
@@ -112,7 +114,7 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 		const locked = (method === "PIN" || method === "QRCODE") && (await tooManyFailedCodes(env, claims.sub));
 		result = locked
 			? { decision: "NO", reason_code: "TOO_MANY_ATTEMPTS", allowed_methods: [] }
-			: await decide(env, projectId, method, body.value, houseCode as string | undefined);
+			: await decide(env, projectId, method, body.value, houseCode as string | undefined, province as string | undefined);
 	} catch (err) {
 		console.error("authorize failed", eventId, err);
 		result = { decision: "ERROR", reason_code: "INTERNAL_ERROR", allowed_methods: [] };
