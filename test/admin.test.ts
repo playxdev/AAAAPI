@@ -5,10 +5,10 @@ import { hashPassword, sha256Hex } from "../src/crypto";
 const PASSWORD = "correct-horse-battery";
 const DEVICE_SECRET = "admin-test-device-secret";
 
-const call = async (method: string, path: string, token?: string, body?: unknown) => {
+const call = async (method: string, path: string, token?: string, body?: unknown, headers: Record<string, string> = {}) => {
 	const res = await exports.default.fetch(`https://aaa.test${path}`, {
 		method,
-		headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+		headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers },
 		body: body === undefined ? undefined : JSON.stringify(body),
 	});
 	return { status: res.status, body: (await res.json()) as Record<string, any> };
@@ -52,7 +52,7 @@ describe("admin auth", () => {
 		// case / dash / spaces in the code do not matter; the canonical code comes back
 		const ok = await login("admin-a", PASSWORD, " prja0001 ");
 		expect(ok.status).toBe(200);
-		expect(ok.body.project_code).toBe("PRJA-0001");
+		expect(ok.body).toMatchObject({ project_code: "PRJA-0001", project_name: "A" });
 		// right name + password, wrong project -> same answer as a wrong password
 		expect((await login("admin-a", PASSWORD, "PRJB-0001")).body).toEqual({ error: "INVALID_LOGIN" });
 		expect((await login("admin-a", PASSWORD, "NOPE-0000")).status).toBe(401);
@@ -78,7 +78,7 @@ describe("house lifecycle", () => {
 	it("house -> contact -> vehicle -> credential, and the access API follows every change", async () => {
 		const t = (await login("admin-a")).body.access_token;
 
-		const house = await call("POST", "/api/v1/admin/houses", t, { house_number: "99/1" });
+		const house = await call("POST", "/api/v1/admin/houses", t, { house_number: "99/1", house_code: "991" });
 		expect(house.status).toBe(201);
 		const hid = house.body.house_id;
 		const owner = await call("POST", `/api/v1/admin/houses/${hid}/contacts`, t, { full_name: "สมชาย ใจดี", phone_number: "0812345678", role: "OWNER" });
@@ -89,10 +89,12 @@ describe("house lifecycle", () => {
 		expect((await call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: "ฮฮ-1111" })).status).toBe(409);
 		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "YES" });
 
-		const pin = await call("POST", `/api/v1/admin/houses/${hid}/credentials`, t, { cred_type: "PIN", value: "908172" });
+		// PIN = house_code + 4 หลัก (กดที่ Keypad ทั้ง 7 หลัก), label = ชื่อสั้น
+		const pin = await call("POST", `/api/v1/admin/houses/${hid}/credentials`, t, { cred_type: "PIN", value: "8172", label: "pin ส่งของ" });
+		expect(pin.body).toMatchObject({ value: "9918172", label: "pin ส่งของ" });
 		expect(pin.status).toBe(201);
-		expect(await authorize("PIN", "908172")).toMatchObject({ decision: "YES" });
-		expect((await call("POST", `/api/v1/admin/houses/${hid}/credentials`, t, { cred_type: "PIN", value: "12" })).status).toBe(400);
+		expect(await authorize("PIN", "9918172")).toMatchObject({ decision: "YES" });
+		expect((await call("POST", `/api/v1/admin/houses/${hid}/credentials`, t, { cred_type: "PIN", value: "908172" })).status).toBe(400);
 
 		// ค้างชำระ -> ANPR ถูกปฏิเสธ
 		expect((await call("PATCH", `/api/v1/admin/houses/${house.body.house_id}`, t, { payment_status: "OVERDUE" })).status).toBe(200);
@@ -124,22 +126,25 @@ describe("house lifecycle", () => {
 		expect(vals).toContain("2030-01-01 00:00:00");
 		expect(vals.some((v: any) => v && Math.round((Date.parse(v.replace(" ", "T") + "Z") - Date.now()) / 86_400_000) === 7)).toBe(true);
 		expect(JSON.stringify(detail.body)).not.toContain("cred_hash");
-		expect(JSON.stringify(detail.body)).not.toContain("908172");
+		expect(JSON.stringify(detail.body)).not.toContain("9918172");
+		expect(detail.body.credentials[0]).toMatchObject({ label: "pin ส่งของ", issued_by_type: "ADMIN" });
 
 		// เพิกถอน PIN
 		await call("DELETE", `/api/v1/admin/credentials/${pin.body.credential_id}`, t);
-		expect(await authorize("PIN", "908172")).toMatchObject({ decision: "NO", reason_code: "CREDENTIAL_REVOKED" });
+		expect(await authorize("PIN", "9918172")).toMatchObject({ decision: "NO", reason_code: "CREDENTIAL_REVOKED" });
 
 		await call("PATCH", `/api/v1/admin/houses/${house.body.house_id}`, t, { payment_status: "NORMAL" });
 		// QRCODE: no value -> server generates one; a client value must be 20 chars of the code alphabet
 		const qrPost = (value?: string) => call("POST", `/api/v1/admin/houses/${hid}/credentials`, t, { cred_type: "QRCODE", value });
 		const qr = await qrPost();
 		expect(qr.status).toBe(201);
-		expect(qr.body.value).toMatch(/^[A-HJ-NP-Z2-9]{20}$/);
+		// QR = house_code + 20 ตัว
+		expect(qr.body.value).toMatch(/^991[A-HJ-NP-Z2-9]{20}$/);
 		expect(await authorize("QRCODE", qr.body.value)).toMatchObject({ decision: "YES" });
 		const mine = "ABCDEFGHJKLMNPQRSTUV";
-		expect((await qrPost(mine)).body.value).toBe(mine);
-		expect(await authorize("QRCODE", mine)).toMatchObject({ decision: "YES" });
+		expect((await qrPost(mine)).body.value).toBe(`991${mine}`);
+		expect(await authorize("QRCODE", `991${mine}`)).toMatchObject({ decision: "YES" });
+		expect(await authorize("QRCODE", mine)).toMatchObject({ decision: "NO" });
 		expect((await qrPost(mine)).status).toBe(409);
 		expect((await qrPost("MINE")).status).toBe(400);
 		expect((await qrPost("ABCDEFGHJKLMNPQRSTU1")).status).toBe(400); // 1 is not in the alphabet
@@ -151,7 +156,7 @@ describe("house lifecycle", () => {
 		// ไม่มีผู้อยู่อาศัย -> ทุกช่องทางของบ้านใช้ไม่ได้ และเพิ่มใหม่ไม่ได้
 		await call("PATCH", `/api/v1/admin/houses/${hid}`, t, { occupancy_status: "VACANT" });
 		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "NO", reason_code: "HOUSE_VACANT" });
-		expect(await authorize("QRCODE", mine)).toMatchObject({ decision: "NO", reason_code: "HOUSE_VACANT" });
+		expect(await authorize("QRCODE", `991${mine}`)).toMatchObject({ decision: "NO", reason_code: "HOUSE_VACANT" });
 		expect((await call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: "ฮฮ 2222" })).body).toMatchObject({ error: "HOUSE_VACANT" });
 		expect((await call("PATCH", `/api/v1/admin/houses/${hid}`, t, { occupancy_status: "EMPTY" })).status).toBe(400);
 		await call("PATCH", `/api/v1/admin/houses/${hid}`, t, { occupancy_status: "OCCUPIED" });
@@ -215,6 +220,39 @@ describe("house lifecycle", () => {
 		const listed = (await call("GET", "/api/v1/admin/houses", t)).body.houses.find((h: any) => h.house_id === hid);
 		expect(listed.contacts.map((c: any) => c.role)).toEqual(["OWNER", "TENANT"]);
 		expect((await call("PATCH", `/api/v1/admin/contacts/${tenant}`, t, { role: "RESIDENT" })).status).toBe(200);
+	});
+});
+
+describe("root", () => {
+	it("root (PLAY-0013) manages projects and their admins; admins cannot", async () => {
+		await env.DB.prepare("INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password, admin_level, ref) VALUES ('ROOT1', 'PRJ-PLAY', 'root', ?, 'ROOT', 'PLAY-0013-R01')")
+			.bind(await hashPassword(PASSWORD))
+			.run();
+		const r = await login("root", PASSWORD, "PLAY-0013");
+		expect(r.body).toMatchObject({ admin_level: "ROOT", project_code: "PLAY-0013" });
+		const root = r.body.access_token;
+		const a = (await login("admin-a")).body;
+		expect(a.admin_level).toBe("ADMIN");
+
+		expect((await call("GET", "/api/v1/admin/projects", a.access_token)).status).toBe(403);
+		expect((await call("POST", "/api/v1/admin/admins", a.access_token, { project_code: "PRJA-0001", admin_name: "x", password: PASSWORD })).status).toBe(403);
+
+		const p = await call("POST", "/api/v1/admin/projects", root, { project_code: "sntw bk01", project_name: "แสนสิริ บางนา" });
+		expect(p.body.project_code).toBe("SNTW-BK01");
+		expect((await call("POST", "/api/v1/admin/projects", root, { project_code: "SNTW-BK01", project_name: "dup" })).status).toBe(409);
+		const ad = await call("POST", "/api/v1/admin/admins", root, { project_code: "SNTW-BK01", admin_name: "admin", password: PASSWORD });
+		expect(ad.body.ref).toBe("SNTW-BK01-A01");
+		expect((await call("POST", "/api/v1/admin/admins", root, { project_code: "SNTW-BK01", admin_name: "admin", password: PASSWORD })).status).toBe(409);
+		expect((await call("POST", "/api/v1/admin/admins", root, { project_code: "SNTW-BK01", admin_name: "y", password: "short" })).status).toBe(400);
+		expect((await login("admin", PASSWORD, "SNTW-BK01")).status).toBe(200);
+
+		// root works inside any project with X-Project-Code; an admin's header is ignored
+		await call("POST", "/api/v1/admin/houses", root, { house_number: "1/1" }, { "X-Project-Code": "SNTW-BK01" });
+		expect((await call("GET", "/api/v1/admin/houses", root, undefined, { "X-Project-Code": "SNTW-BK01" })).body.houses).toHaveLength(1);
+		expect((await call("GET", "/api/v1/admin/houses", root, undefined, { "X-Project-Code": "NOPE-0000" })).status).toBe(404);
+		const bHouses = (await call("GET", "/api/v1/admin/houses", (await login("admin-b")).body.access_token, undefined, { "X-Project-Code": "SNTW-BK01" })).body.houses;
+		expect(bHouses).toHaveLength(0);
+		expect((await call("GET", "/api/v1/admin/projects", root)).body.projects.map((x: any) => x.project_code)).toContain("SNTW-BK01");
 	});
 });
 

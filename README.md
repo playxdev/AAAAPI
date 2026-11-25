@@ -42,11 +42,12 @@ Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievir
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
 สถานะ production (2026-11-25, beta):
-- Migration `0001`–`0005` apply แล้ว, policy seed แล้ว (apply 2026-11-25; Time Travel bookmark ก่อน apply
+- Migration `0001`–`0006` apply แล้ว, policy seed แล้ว (`0006` apply 2026-11-26 bookmark ก่อน apply `00000006-00000000-0000512e-973be42f89af91dde1fb5e13e5b5897f`; Time Travel bookmark ก่อน apply
   `0004` = สิทธิ์เข้าออกเป็นของบ้าน: `00000002-00000000-0000512e-1d3fb267a62c19c8230ce52ff558934c`,
   `0005` = รหัสโครงการ: `00000003-00000000-0000512e-4eeff727b4aa67764011d2ed1af98f5f`)
 - Device ทดสอบของ SEMA: `SEMA-000-01` (`PRJ-000`, ทางเข้า)
 - โครงการ `PRJ-000` รหัสโครงการ `PROJ-0001` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
+- Root: โครงการ `PRJ-PLAY` รหัส `PLAY-0013` (PlayDevX) + `root` (`ADM-ROOT`, ref `PLAY-0013-R01`) จัดการทุกโครงการ
 - ล้างข้อมูลทดสอบแล้ว 2026-11-12 (เหลือโครงการ, admin, policy) ข้อมูลยังเป็น beta ล้างได้
 - `ALLOWED_ORIGINS` = `https://aaa-admin.pages.dev` (Admin WebApp, ตรงกันทั้งตัว URL preview ของ Pages ใช้ไม่ได้)
 - ยังว่าง: `LINE_CHANNEL_ID` (LIFF ยังเรียก API ไม่ได้)
@@ -56,6 +57,9 @@ Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่�
 ### สร้างโครงการ + Admin คนแรก
 
 ทุกโครงการ (หมู่บ้าน / คอนโด / อาคาร / สถานที่) ใช้ DB ร่วมกัน แยกด้วย `project_id`
+Root (`ROOT`, PlayDevX) สร้างโครงการ + Admin ได้จากหน้า "โครงการ" ใน Admin WebApp หรือ `POST /api/v1/admin/projects`, `/admins`
+Root เพิ่มด้วย SQL เท่านั้น (`admin_level = 'ROOT'` ในโครงการ `PRJ-PLAY`)
+
 Admin login ด้วย **รหัสโครงการ** `AAAA-AA11` (ชื่อย่อ A–Z 4 ตัว + สาขา / ลำดับ A–Z 0–9 4 ตัว เช่น `PROJ-0001`, `SNTW-BK01`)
 เก็บใน `tb_project.project_code` แบบตัวใหญ่ + ขีด ห้ามซ้ำ; `admin_name` ห้ามซ้ำเฉพาะในโครงการเดียวกัน
 
@@ -118,24 +122,34 @@ Header `Authorization: Bearer <JWT>`
 ทุก endpoint (ยกเว้น login) ต้องส่ง Header `Authorization: Bearer <admin JWT>`
 `project_id` มาจาก token เสมอ admin โครงการอื่นจะได้ `404` เหมือนไม่มีข้อมูล
 
+ระดับผู้ดูแล (`tb_admin.admin_level`):
+- `ROOT` = PlayDevX (โครงการ `PLAY-0013`) จัดการได้ทุกโครงการ: ส่ง Header `X-Project-Code: PROJ-0001` เพื่อทำงานในโครงการนั้น
+  (ไม่ส่ง = โครงการของตัวเอง, ไม่พบ → `404 PROJECT_NOT_FOUND`); สร้างโครงการ / Admin ได้; Root เพิ่มด้วย SQL เท่านั้น
+- `ADMIN` = ประจำโครงการ (Header `X-Project-Code` ถูกเมิน); `/projects`, `/admins` → `403 FORBIDDEN`
+
 | Method | Endpoint | Body / หมายเหตุ |
 |---|---|---|
-| `POST` | `/api/v1/admin/login` | `{ project_code, admin_name, password }` → `{ access_token, expires_in: 3600, project_code }`; รหัสโครงการไม่สนตัวเล็กใหญ่ / ขีด, รูปแบบผิด → `400`, โครงการ / ชื่อ / รหัสผ่านผิด หรือโครงการปิดใช้งาน → `401 INVALID_LOGIN` (ไม่บอกว่าผิดช่องไหน) |
+| `POST` | `/api/v1/admin/login` | `{ project_code, admin_name, password }` → `{ access_token, expires_in: 3600, project_code, project_name, admin_level }`; รหัสโครงการไม่สนตัวเล็กใหญ่ / ขีด, รูปแบบผิด → `400`, โครงการ / ชื่อ / รหัสผ่านผิด หรือโครงการปิดใช้งาน → `401 INVALID_LOGIN` (ไม่บอกว่าผิดช่องไหน) |
 | `GET` | `/api/v1/admin/houses` | รายการบ้าน + `contacts[]` (เจ้าบ้านขึ้นก่อน = ผู้ติดต่อหลัก) |
 | `POST` | `/api/v1/admin/houses` | `{ house_number, house_code?, zone_or_soi?, occupancy_status? }` |
 | `GET` | `/api/v1/admin/houses/:id` | บ้าน + `contacts` + `vehicles` + `credentials` (ไม่มี hash / ค่าจริง) |
 | `PATCH` | `/api/v1/admin/houses/:id` | `{ house_number?, house_code?, zone_or_soi?, payment_status?, occupancy_status?, is_active? }` |
-| `POST` | `/api/v1/admin/houses/:id/contacts` | `{ full_name, phone_number?, role? }` `role` = `OWNER` / `RESIDENT` (ค่าเริ่มต้น) / `TENANT` |
-| `PATCH` | `/api/v1/admin/contacts/:id` | `{ full_name?, phone_number?, role? }` |
+| `POST` | `/api/v1/admin/houses/:id/contacts` | `{ full_name, phone_number?, role? }` → `{ user_id, ref, role }`; `role` = `OWNER` (ค่าเริ่มต้น) / `FAMILY` / `RESIDENT` / `TENANT` |
+| `PATCH` | `/api/v1/admin/contacts/:id` | `{ full_name?, phone_number?, role? }` ตั้งเป็น `OWNER` = เจ้าบ้านเดิมกลายเป็น `RESIDENT` อัตโนมัติ (บัญชี LINE ของทั้งคู่ใช้ต่อได้) |
 | `DELETE` | `/api/v1/admin/contacts/:id` | ลบผู้ติดต่อ (soft delete) ไม่กระทบสิทธิ์เข้าออกของบ้าน บัญชี LINE ของเขาใช้ไม่ได้ |
 | `POST` | `/api/v1/admin/contacts/:id/link-code` | ออกรหัสผูก LINE 8 ตัว ใช้ครั้งเดียว อายุ 24 ชม. → `{ user_id, link_code }` |
 | `POST` | `/api/v1/admin/houses/:id/vehicles` | `{ license_plate, province?, brand?, color? }` ดู "ทะเบียนรถ" ด้านล่าง |
 | `DELETE` | `/api/v1/admin/vehicles/:id` | ปิดใช้งานรถ |
-| `POST` | `/api/v1/admin/houses/:id/credentials` | `{ cred_type: RFID\|QRCODE\|PIN, value?, duration?, valid_from?, valid_until? }` ดู "บัตร / PIN / QR" ด้านล่าง |
+| `POST` | `/api/v1/admin/houses/:id/credentials` | `{ cred_type: RFID\|QRCODE\|PIN, value?, label?, duration?, valid_from?, valid_until? }` ดู "บัตร / PIN / QR" ด้านล่าง |
 | `DELETE` | `/api/v1/admin/credentials/:id` | เพิกถอน (`REVOKED`) |
 | `GET` | `/api/v1/admin/visitors` | `?house_id=` / `?valid=1` (เฉพาะที่ยังไม่หมดอายุ) |
 | `POST` | `/api/v1/admin/visitors` | `{ duration, house_id?, full_name?, phone_number?, license_plate?, purpose?, issue_code? }` ไม่ส่ง `house_id` = งานส่วนกลาง, บ้าน `VACANT` → `409 HOUSE_VACANT` |
 | `DELETE` | `/api/v1/admin/visitors/:id` | เพิกถอน visitor + Guest Code |
+| `GET` | `/api/v1/admin/projects` | **ROOT** ทุกโครงการ + จำนวนบ้าน / admin |
+| `POST` | `/api/v1/admin/projects` | **ROOT** `{ project_code, project_name }` สร้างโครงการ + policy ตั้งต้น; ซ้ำ → `409` |
+| `GET` | `/api/v1/admin/admins` | **ROOT** ผู้ดูแลทุกโครงการ (`ref`, `admin_level`) |
+| `POST` | `/api/v1/admin/admins` | **ROOT** `{ project_code, admin_name, password }` สร้าง `ADMIN` (รหัสผ่าน ≥ 12 ตัว) → `{ admin_id, ref }` เช่น `SNTW-BK01-A01`; ชื่อซ้ำในโครงการ → `409 ADMIN_EXISTS` |
+| `DELETE` | `/api/v1/admin/admins/:id` | **ROOT** ปิดใช้งาน `ADMIN` |
 
 - สิทธิ์เข้าออก (รถ / บัตร / PIN / QR) เป็นของ **บ้าน** ไม่ใช่ของคน; `tb_user` = ผู้ติดต่อของบ้าน + บัญชี LINE
 - `payment_status`: `NORMAL` / `OVERDUE` / `OVERDUE_SEVERE`
@@ -143,31 +157,47 @@ Header `Authorization: Bearer <JWT>`
 - ทะเบียนรถ: หมวด + เลข 1–4 หลัก (`กข 1234`, `1กข 1234`, `รวย 9999`, `จ 12`) หรือรถบรรทุก / รถโดยสาร `70-1234` (เลข 2 + 4 หลัก)
   ไม่ตรง → `400` (`field: license_plate`); เก็บแบบตัดช่องว่าง / ขีด; จังหวัดเก็บเป็นชื่อเต็ม
   ทะเบียนเดียวกันต่างจังหวัด = คนละคัน; ซ้ำในจังหวัดเดียวกัน (หรือฝั่งใดไม่ระบุจังหวัด) → `409 PLATE_EXISTS`
-- บัตร / PIN / QR: PIN = ตัวเลข 4–8 หลัก; QRCODE = 20 ตัวจาก `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`
-  (ไม่ส่ง `value` = server สร้างให้, คืน `value` ครั้งเดียวใน response); ค่าซ้ำในโครงการ → `409 CREDENTIAL_EXISTS`
+- บัตร / PIN / QR (กติกาเดียวกันทั้ง Admin และ Owner API ใน `src/access.ts`):
+  - **PIN** = `house_code` + 4 หลัก เช่น `98061234` (กดที่ Keypad ทั้งหมด); `value` = 4 หลัก หรือไม่ส่ง = สุ่ม
+  - **QRCODE** = `house_code` + 20 ตัวจาก `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` เช่น `9806P5MJ3G3CC5SCM5RASM4M` (เนื้อ QR ทั้งหมด);
+    `value` = 20 ตัวหลัง หรือไม่ส่ง = สุ่ม; บ้านไม่มี `house_code` → `409 HOUSE_CODE_MISSING`
+  - PIN / QR คืน `value` เต็มครั้งเดียวใน response; ใช้งานอยู่ได้ไม่เกิน **20 ชุดต่อบ้านต่อชนิด** → `409 LIMIT_REACHED` (ต้องเพิกถอนก่อน)
+  - **RFID** เฉพาะ Admin / Root (`value` = เลขบัตร, ไม่คืนค่า)
+  - `label` (≤ 32 ตัว) ชื่อสั้น เช่น "บัตรแม่", "pin ส่งของ"; `issued_by_type` / `issued_by_id` = ผู้สร้าง (`ADMIN` / `OWNER` = คนในบ้าน)
+  - ค่าซ้ำในโครงการ (รวม PIN ชน Guest Code) → `409 CREDENTIAL_EXISTS`; Admin / Root เพิกถอนได้ทุกรายการ
   อายุ: `valid_until` (กำหนดเอง) > `duration` (`1d` / `7d` / `14d` / `30d` / `1y` / `forever` = ไม่มีวันหมดอายุ) > ไม่ส่ง = 24 ชั่วโมง
 - `house_code`: ตัวเลข 1–6 หลัก ไม่ขึ้นต้นด้วย 0 ไม่ซ้ำในโครงการ ต้องมีก่อนบ้านนั้นจะออก Guest Code ได้
 - Error: `{ "error": "BAD_REQUEST", "field": "<ชื่อ field>" }`, `NOT_FOUND`, `PLATE_EXISTS`, `CREDENTIAL_EXISTS`,
   `HOUSE_CODE_MISSING`, `HOUSE_VACANT`, `GUEST_CODE_UNAVAILABLE`, `CONFLICT`, `UNAUTHORIZED`
 - ค่าของ RFID / QR / PIN ถูก hash ทันที อ่านค่าจริงกลับจาก API ไม่ได้
 
-## Owner API (LINE LIFF)
+## Owner API (LINE Mini App)
 
-สำหรับผู้ติดต่อของบ้าน (เจ้าบ้าน / ผู้อยู่อาศัย / ผู้เช่า) เรียกจาก LIFF app ส่ง LIFF ID Token (`liff.getIDToken()`) มาแลก JWT
+สำหรับคนในบ้านทุกสถานะ (`OWNER` เจ้าบ้าน / `FAMILY` ลูกบ้าน / `RESIDENT` ผู้พักอาศัย / `TENANT` ผู้เช่า) เรียกจาก LINE Mini App (AAAAPP)
+ส่ง ID Token (`liff.getIDToken()`) มาแลก JWT; ไม่คืนรหัสโครงการ / `project_id`
+
+คนในบ้านมี `ref` ไม่ซ้ำทั้งระบบ เช่น `PROJ-0001-9806-01` (เจ้าบ้าน), `-02`, `-03` …; เจ้าบ้านมีได้ 1 คนต่อบ้าน
 
 ผูกบัญชีครั้งแรก:
-1. Admin เรียก `POST /api/v1/admin/contacts/:id/link-code` แล้วส่งรหัสให้ผู้ติดต่อคนนั้น
-2. ผู้ติดต่อเปิด LIFF กรอกรหัส → LIFF เรียก `POST /api/v1/owner/link`
-3. ครั้งต่อไป LIFF เรียก `POST /api/v1/owner/login` ได้เลย
+1. Admin สร้างเจ้าบ้าน (`POST /houses/:id/contacts`) แล้ว `POST /api/v1/admin/contacts/:id/link-code` ส่งรหัสให้เจ้าบ้าน
+2. เจ้าบ้านกรอกรหัสใน Mini App → `POST /api/v1/owner/link`
+3. เจ้าบ้านเชิญสมาชิก `POST /api/v1/owner/members` ได้รหัสเชิญ ส่งให้สมาชิกกรอกใน Mini App (`/owner/link` เหมือนกัน)
+4. ครั้งต่อไปเรียก `POST /api/v1/owner/login` ได้เลย
 
 | Method | Endpoint | Body / หมายเหตุ |
 |---|---|---|
 | `POST` | `/api/v1/owner/link` | `{ id_token, link_code }` → JWT; รหัสผิด / หมดอายุ → `400 INVALID_LINK_CODE`, LINE ผูกกับคนอื่นแล้ว → `409` |
 | `POST` | `/api/v1/owner/login` | `{ id_token }` → JWT; ยังไม่ผูก → `403 NOT_LINKED` |
-| `GET` | `/api/v1/owner/me` | ข้อมูลผู้ติดต่อ + บ้าน + `house_code` + `occupancy_status` |
+| `GET` | `/api/v1/owner/me` | ตัวเอง (`ref`, `role`) + บ้าน + `house_code` + `occupancy_status` |
+| `GET` | `/api/v1/owner/house` | `me` + `members` + `vehicles` (ดูอย่างเดียว) + `credentials` (`label`, ผู้สร้าง, `mine` = ลบได้) |
+| `POST` | `/api/v1/owner/members` | **OWNER** `{ full_name, phone_number?, role: FAMILY\|RESIDENT\|TENANT }` → `{ user_id, ref, link_code }` (รหัสเชิญใช้ครั้งเดียว 24 ชม.); อื่น → `403 OWNER_ONLY` |
+| `POST` | `/api/v1/owner/members/:id/link-code` | **OWNER** ออกรหัสเชิญใหม่ |
+| `DELETE` | `/api/v1/owner/members/:id` | **OWNER** ลบสมาชิก (ลบเจ้าบ้านไม่ได้) |
+| `POST` | `/api/v1/owner/credentials` | `{ cred_type: PIN\|QRCODE, value?, label?, duration? }` กติกาเดียวกับ Admin (RFID ไม่ได้) |
+| `DELETE` | `/api/v1/owner/credentials/:id` | ลบได้เฉพาะที่ตัวเองสร้าง |
 | `GET` | `/api/v1/owner/visitors` | visitor ของบ้านตัวเองเท่านั้น (`?valid=1`) |
 | `POST` | `/api/v1/owner/visitors` | `{ duration, full_name?, phone_number?, license_plate?, purpose? }` → `{ visitor_id, code, valid_until }`; บ้าน `VACANT` → `409 HOUSE_VACANT` |
-| `DELETE` | `/api/v1/owner/visitors/:id` | เพิกถอน (เฉพาะ visitor ของบ้านตัวเอง) |
+| `DELETE` | `/api/v1/owner/visitors/:id` | เพิกถอนได้เฉพาะ visitor ที่ตัวเองออก |
 
 ### Guest Code
 

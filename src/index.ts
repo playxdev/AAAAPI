@@ -174,7 +174,7 @@ function withCors(req: Request, env: Env, res: Response): Response {
 	if (origin && allowed.includes(origin)) {
 		res.headers.set("Access-Control-Allow-Origin", origin);
 		res.headers.set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE");
-		res.headers.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+		res.headers.set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Project-Code");
 		res.headers.set("Access-Control-Max-Age", "86400");
 	}
 	res.headers.append("Vary", "Origin");

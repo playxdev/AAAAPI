@@ -44,7 +44,7 @@ const ids: Record<string, string> = {};
 
 beforeAll(async () => {
 	const policy = [
-		["RESIDENT", "ANPR"], ["RESIDENT", "PIN"],
+		["RESIDENT", "ANPR"], ["RESIDENT", "PIN"], ["RESIDENT", "QRCODE"],
 		["VISITOR", "QRCODE"], ["VISITOR", "PIN"], ["VISITOR", "ANPR"],
 	];
 	await env.DB.batch([
@@ -182,11 +182,81 @@ describe("guest codes", () => {
 
 	it("resident PIN cannot equal an active guest code", async () => {
 		const g = await call("POST", "/api/v1/owner/visitors", owner, { duration: "1d" });
+		// Guest Code 9801+xxxx และ PIN 9801 + xxxx อยู่ในชุดตัวเลขเดียวกัน
 		const res = await call("POST", `/api/v1/admin/houses/${ids.house}/credentials`, admin, {
 			cred_type: "PIN",
-			value: g.body.code.replace("+", ""),
+			value: g.body.code.split("+")[1],
 		});
 		expect(res.status).toBe(409);
+	});
+});
+
+describe("house members via LINE", () => {
+	let owner = "";
+	let fam = "";
+	beforeAll(async () => {
+		owner = (await call("POST", "/api/v1/owner/login", undefined, { id_token: "line:U-owner1" })).body.access_token;
+	});
+
+	it("owner sees the house without the project code and invites a member", async () => {
+		const house = await call("GET", "/api/v1/owner/house", owner);
+		expect(house.body).toMatchObject({ role: "OWNER", house_code: "9801", ref: "VILL-0001-9801-01" });
+		expect(JSON.stringify(house.body)).not.toContain("VILL-0001\"");
+		expect(house.body.project_id).toBeUndefined();
+
+		const m = await call("POST", "/api/v1/owner/members", owner, { full_name: "ลูกสาว", role: "FAMILY" });
+		expect(m.status).toBe(201);
+		expect(m.body).toMatchObject({ role: "FAMILY", ref: "VILL-0001-9801-02" });
+		expect((await call("POST", "/api/v1/owner/members", owner, { full_name: "x", role: "OWNER" })).status).toBe(400);
+		const linked = await call("POST", "/api/v1/owner/link", undefined, { id_token: "line:U-fam1", link_code: m.body.link_code });
+		fam = linked.body.access_token;
+		expect((await call("GET", "/api/v1/owner/me", fam)).body).toMatchObject({ role: "FAMILY", house_code: "9801" });
+
+		// only the owner manages members
+		expect((await call("POST", "/api/v1/owner/members", fam, { full_name: "y" })).body.error).toBe("OWNER_ONLY");
+		expect((await call("DELETE", `/api/v1/owner/members/${ids.owner}`, owner)).status).toBe(404);
+	});
+
+	it("members create PIN / QR with the house code; RFID is admin only; each deletes only their own", async () => {
+		const pin = await call("POST", "/api/v1/owner/credentials", fam, { cred_type: "PIN", label: "pin ส่งของ" });
+		expect(pin.body.value).toMatch(/^9801\d{4}$/);
+		expect(await gate("PIN", pin.body.value)).toMatchObject({ decision: "YES" });
+		const qr = await call("POST", "/api/v1/owner/credentials", fam, { cred_type: "QRCODE", label: "QR เพื่อน" });
+		expect(qr.body.value).toMatch(/^9801[A-HJ-NP-Z2-9]{20}$/);
+		expect(await gate("QRCODE", qr.body.value)).toMatchObject({ decision: "YES" });
+		expect((await call("POST", "/api/v1/owner/credentials", fam, { cred_type: "RFID", value: "CARD-X" })).body.field).toBe("cred_type");
+
+		const mine = (await call("GET", "/api/v1/owner/house", fam)).body.credentials.find((c: any) => c.credential_id === pin.body.credential_id);
+		expect(mine).toMatchObject({ label: "pin ส่งของ", mine: true });
+		expect((await call("DELETE", `/api/v1/owner/credentials/${pin.body.credential_id}`, owner)).status).toBe(404);
+		expect((await call("DELETE", `/api/v1/owner/credentials/${pin.body.credential_id}`, fam)).status).toBe(200);
+		expect(await gate("PIN", pin.body.value)).toMatchObject({ decision: "NO", reason_code: "CREDENTIAL_REVOKED" });
+		// admin may delete anything in the project
+		expect((await call("DELETE", `/api/v1/admin/credentials/${qr.body.credential_id}`, admin)).status).toBe(200);
+	});
+
+	it("caps active PIN per house at 20", async () => {
+		const res = [];
+		for (let i = 0; i < 21; i++) res.push((await call("POST", "/api/v1/owner/credentials", owner, { cred_type: "PIN" })).body);
+		expect(res.slice(0, 20).filter((r) => !r.value)).toEqual([]);
+		expect(res[20]).toMatchObject({ error: "LIMIT_REACHED" });
+		await call("DELETE", `/api/v1/owner/credentials/${res[0].credential_id}`, owner);
+		expect((await call("POST", "/api/v1/owner/credentials", owner, { cred_type: "PIN" })).status).toBe(201);
+	});
+
+	it("guest codes: every member issues, each revokes only their own", async () => {
+		const g = await call("POST", "/api/v1/owner/visitors", fam, { duration: "1d" });
+		expect(g.status).toBe(201);
+		expect((await call("DELETE", `/api/v1/owner/visitors/${g.body.visitor_id}`, owner)).status).toBe(404);
+		expect((await call("DELETE", `/api/v1/owner/visitors/${g.body.visitor_id}`, fam)).status).toBe(200);
+	});
+
+	it("admin moves the owner role; the old owner becomes a resident and keeps LINE", async () => {
+		const famId = (await call("GET", "/api/v1/owner/me", fam)).body.user_id;
+		expect((await call("PATCH", `/api/v1/admin/contacts/${famId}`, admin, { role: "OWNER" })).status).toBe(200);
+		expect((await call("GET", "/api/v1/owner/me", fam)).body.role).toBe("OWNER");
+		expect((await call("GET", "/api/v1/owner/me", owner)).body.role).toBe("RESIDENT");
+		await call("PATCH", `/api/v1/admin/contacts/${ids.owner}`, admin, { role: "OWNER" });
 	});
 });
 

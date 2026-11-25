@@ -1,7 +1,17 @@
+import {
+	addCredential as addHouseCredential,
+	createHouseUser,
+	credentialColumns,
+	demoteOwner,
+	HOUSE_ROLES,
+	issueLinkCode,
+	requireOccupiedHouse,
+	revokeCredential as revokeHouseCredential,
+} from "./access";
 import { auditTarget, writeAudit } from "./audit";
-import { credentialHash, normalizePlate, normalizeProvince, type Method } from "./authorize";
-import { JWT_ISS, sha256Hex, signJwt, verifyJwt, verifyPassword } from "./crypto";
-import { COMMON_AREA_PREFIX, DURATION_DAYS, HOUSE_CODE_RE, issueGuest, listVisitors, revokeVisitor } from "./guest";
+import { normalizePlate, normalizeProvince, type Method } from "./authorize";
+import { hashPassword, JWT_ISS, sha256Hex, signJwt, verifyJwt, verifyPassword } from "./crypto";
+import { COMMON_AREA_PREFIX, HOUSE_CODE_RE, issueGuest, listVisitors, revokeVisitor } from "./guest";
 import {
 	badField,
 	type Body,
@@ -29,7 +39,8 @@ const ADMIN_CRED_TYPES: Method[] = ["RFID", "QRCODE", "PIN"];
 interface Ctx {
 	env: Env;
 	adminId: string;
-	pid: string; // project_id ของ admin ที่ login ทุก query ต้องกรองด้วยค่านี้
+	level: string; // ROOT (PlayDevX, ทุกโครงการ) / ADMIN (ประจำโครงการ)
+	pid: string; // project_id ที่กำลังจัดการ (ADMIN = ของตัวเอง, ROOT = ตาม X-Project-Code) ทุก query ต้องกรองด้วยค่านี้
 	id: string;
 	body: Body;
 	url: URL;
@@ -43,12 +54,6 @@ function optActive(body: Body): number | undefined {
 function optHouseCode(body: Body): string | null | undefined {
 	const v = optStr(body, "house_code", 6);
 	if (v && !HOUSE_CODE_RE.test(v)) throw badField("house_code");
-	return v;
-}
-
-function optDate(body: Body, name: string): string | null | undefined {
-	const v = optStr(body, name, 40);
-	if (v && Number.isNaN(Date.parse(v))) throw badField(name);
 	return v;
 }
 
@@ -74,10 +79,9 @@ async function requireRow(c: Ctx, table: string, idCol: string, id: string) {
 
 const HOUSE_COLS = "house_id, house_number, house_code, zone_or_soi, payment_status, occupancy_status, is_active, update_date";
 const OCCUPANCY = ["OCCUPIED", "VACANT"];
-const CONTACT_ROLES = ["OWNER", "RESIDENT", "TENANT"];
-const CONTACT_COLS = "user_id, house_id, full_name, phone_number, role, line_user_id IS NOT NULL AS line_linked";
+const CONTACT_COLS = "user_id, ref, house_id, full_name, phone_number, role, line_user_id IS NOT NULL AS line_linked";
 // เจ้าบ้านขึ้นก่อน (= ผู้ติดต่อหลัก) แล้วตามลำดับที่เพิ่ม
-const CONTACT_ORDER = "CASE role WHEN 'OWNER' THEN 0 WHEN 'TENANT' THEN 1 ELSE 2 END, autoID";
+const CONTACT_ORDER = "CASE role WHEN 'OWNER' THEN 0 ELSE 1 END, autoID";
 
 async function listHouses(c: Ctx) {
 	const db = c.env.DB;
@@ -99,12 +103,11 @@ async function getHouse(c: Ctx) {
 			c.pid,
 		),
 		db.prepare(
-			"SELECT vehicle_id, license_plate, province, brand, color, is_active FROM tb_vehicle WHERE house_id = ? AND project_id = ?",
+			"SELECT vehicle_id, license_plate, province, brand, color, label, is_active FROM tb_vehicle WHERE house_id = ? AND project_id = ?",
 		).bind(c.id, c.pid),
 		// ห้ามคืน cred_hash
 		db.prepare(
-			`SELECT credential_id, cred_type, valid_from, valid_until, max_uses, use_count, is_active, id_status
-			 FROM tb_credential WHERE house_id = ? AND project_id = ?`,
+			`SELECT ${credentialColumns} FROM tb_credential WHERE house_id = ? AND project_id = ?`,
 		).bind(c.id, c.pid),
 	]);
 	if (house.results.length === 0) throw notFound();
@@ -145,39 +148,27 @@ async function updateHouse(c: Ctx) {
 	return json({ house_id: c.id });
 }
 
-// บ้านต้องมีอยู่ และไม่ใช่ "ไม่มีผู้อยู่อาศัย" ถึงจะเพิ่มช่องทางเข้าออก / ผู้เยี่ยมชมได้
-async function requireOccupiedHouse(c: Ctx, houseId: string) {
-	const house = await c.env.DB.prepare("SELECT occupancy_status, house_code FROM tb_house WHERE house_id = ? AND project_id = ?")
-		.bind(houseId, c.pid)
-		.first<{ occupancy_status: string | null; house_code: string | null }>();
-	if (!house) throw notFound();
-	if (house.occupancy_status === "VACANT") throw new HttpError(409, "HOUSE_VACANT", "house_id");
-	return house;
-}
-
 // ---------- Contacts (tb_user) ----------
 
+// Admin สร้างคนในบ้านได้ทุกสถานะ (ปกติสร้างเจ้าบ้าน แล้วเจ้าบ้านเชิญคนอื่นเองผ่าน LINE)
 async function addContact(c: Ctx) {
-	await requireRow(c, "tb_house", "house_id", c.id);
-	const userId = crypto.randomUUID();
-	await c.env.DB.prepare("INSERT INTO tb_user (user_id, project_id, house_id, full_name, phone_number, role) VALUES (?, ?, ?, ?, ?, ?)")
-		.bind(
-			userId,
-			c.pid,
-			c.id,
-			reqStr(c.body, "full_name", 128),
-			optStr(c.body, "phone_number", 32) ?? null,
-			optEnum(c.body, "role", CONTACT_ROLES) ?? "RESIDENT",
-		)
-		.run();
-	return json({ user_id: userId }, 201);
+	return json(await createHouseUser(c.env, c.pid, c.id, c.body, HOUSE_ROLES, "OWNER"), 201);
 }
 
+// เปลี่ยนเป็นเจ้าบ้าน = เจ้าบ้านเดิมกลายเป็นผู้พักอาศัย (บัญชี LINE ของทั้งสองคนยังใช้ได้)
 async function updateContact(c: Ctx) {
+	const role = optEnum(c.body, "role", HOUSE_ROLES);
+	if (role === "OWNER") {
+		const u = await c.env.DB.prepare("SELECT house_id FROM tb_user WHERE user_id = ? AND project_id = ? AND is_active = 1")
+			.bind(c.id, c.pid)
+			.first<{ house_id: string | null }>();
+		if (!u) throw notFound();
+		if (u.house_id) await demoteOwner(c.env, u.house_id, c.id).run();
+	}
 	await patchRow(c, "tb_user", "user_id", {
 		full_name: c.body.full_name === undefined ? undefined : reqStr(c.body, "full_name", 128),
 		phone_number: optStr(c.body, "phone_number", 32),
-		role: optEnum(c.body, "role", CONTACT_ROLES),
+		role,
 	});
 	return json({ user_id: c.id });
 }
@@ -191,7 +182,7 @@ async function removeContact(c: Ctx) {
 // ---------- Vehicles ----------
 
 async function addVehicle(c: Ctx) {
-	await requireOccupiedHouse(c, c.id);
+	await requireOccupiedHouse(c.env, c.pid, c.id);
 	const plate = normalizePlate(reqStr(c.body, "license_plate", 32));
 	// หมวด (1กข / กข / รวย / 70) + เลข 1-4 หลัก; จังหวัดอยู่อีกช่อง
 	if (!PLATE_RE.test(plate)) throw badField("license_plate");
@@ -206,7 +197,7 @@ async function addVehicle(c: Ctx) {
 
 	const vehicleId = crypto.randomUUID();
 	await c.env.DB.prepare(
-		"INSERT INTO tb_vehicle (vehicle_id, project_id, house_id, license_plate, province, brand, color) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO tb_vehicle (vehicle_id, project_id, house_id, license_plate, province, brand, color, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 	)
 		.bind(
 			vehicleId,
@@ -216,6 +207,7 @@ async function addVehicle(c: Ctx) {
 			province,
 			optStr(c.body, "brand", 64) ?? null,
 			optStr(c.body, "color", 32) ?? null,
+			optStr(c.body, "label", 32) ?? null,
 		)
 		.run();
 	return json({ vehicle_id: vehicleId, license_plate: plate }, 201);
@@ -227,56 +219,15 @@ async function removeVehicle(c: Ctx) {
 }
 
 // ---------- Credentials ----------
+// กติกา (PIN / QR = house_code นำหน้า, จำกัด 20 ชุด, label) อยู่ใน access.ts ใช้ร่วมกับ Owner API
 
 async function addCredential(c: Ctx) {
-	await requireOccupiedHouse(c, c.id);
-	const credType = optEnum(c.body, "cred_type", ADMIN_CRED_TYPES) as Method | undefined;
-	if (!credType) throw badField("cred_type");
-	// QRCODE: 20 chars of LINK_CODE_ALPHABET (100 bits). Admin UI generates it so the admin sees it before saving;
-	// no value = server generates. Returned once in the response; DB keeps only the hash.
-	const value = credType === "QRCODE" ? (optStr(c.body, "value", 20) ?? randomCode(20)) : reqStr(c.body, "value", 256);
-	if (credType === "QRCODE" && !QR_RE.test(value)) throw badField("value");
-	if (credType === "PIN" && !/^\d{4,8}$/.test(value)) throw badField("value");
-	// PIN ห้ามชนกับ Guest Code เพราะ Keypad ส่งมาเป็น method PIN เหมือนกัน
-	if (credType === "PIN") {
-		const guestClash = await c.env.DB.prepare("SELECT 1 FROM tb_credential WHERE project_id = ? AND cred_type = 'GUEST' AND cred_hash = ?")
-			.bind(c.pid, await credentialHash(c.env.CRED_PEPPER, c.pid, "GUEST", value))
-			.first();
-		if (guestClash) throw new HttpError(409, "CREDENTIAL_EXISTS", "value");
-	}
-
-	// วันหมดอายุ: valid_until (กำหนดเอง) > duration (forever = ไม่มีกำหนด / NULL) > ไม่ระบุ = 24 ชั่วโมง
-	const duration = optEnum(c.body, "duration", Object.keys(DURATION_DAYS));
-	const days = DURATION_DAYS[duration ?? "1d"];
-	const validUntil =
-		optDate(c.body, "valid_until") ??
-		(duration === "forever" ? null : new Date(Date.now() + days * 86_400_000).toISOString().replace("T", " ").slice(0, 19));
-
-	const credentialId = crypto.randomUUID();
-	try {
-		await c.env.DB.prepare(
-			`INSERT INTO tb_credential (credential_id, project_id, house_id, cred_type, cred_hash, valid_from, valid_until)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		)
-			.bind(
-				credentialId,
-				c.pid,
-				c.id,
-				credType,
-				await credentialHash(c.env.CRED_PEPPER, c.pid, credType, value),
-				optDate(c.body, "valid_from") ?? null,
-				validUntil,
-			)
-			.run();
-	} catch (err) {
-		if (isUniqueViolation(err)) throw new HttpError(409, "CREDENTIAL_EXISTS", "value");
-		throw err;
-	}
-	return json({ credential_id: credentialId, cred_type: credType, ...(credType === "QRCODE" && { value }) }, 201);
+	return json(await addHouseCredential(c.env, c.pid, c.id, { type: "ADMIN", id: c.adminId }, c.body, ADMIN_CRED_TYPES), 201);
 }
 
+// Admin / Root ลบได้ทุกรายการในโครงการ
 async function revokeCredential(c: Ctx) {
-	await patchRow(c, "tb_credential", "credential_id", { is_active: 0, id_status: "REVOKED" });
+	await revokeHouseCredential(c.env, c.pid, c.id);
 	return json({ credential_id: c.id, id_status: "REVOKED" });
 }
 
@@ -284,24 +235,9 @@ async function revokeCredential(c: Ctx) {
 
 // truck/bus: 2-digit category + exactly 4 digits, otherwise a pure number like "1234" would pass
 const PLATE_RE = /^(\d?[ก-ฮ]{1,3}\d{1,4}|\d{6})$/;
-const QR_RE = /^[A-HJ-NP-Z2-9]{20}$/;
-const LINK_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-// 32 symbols, so b % 32 has no modulo bias.
-const randomCode = (len: number) =>
-	[...crypto.getRandomValues(new Uint8Array(len))].map((b) => LINK_CODE_ALPHABET[b % 32]).join("");
-const LINK_CODE_TTL = "+1 day";
-
-// รหัสครั้งเดียวให้ผู้ติดต่อของบ้านกรอกใน LIFF เพื่อผูกบัญชี LINE กับ tb_user
+// รหัสเชื่อม LINE ของคนในบ้าน (ปกติ = เจ้าบ้าน) ใช้ครั้งเดียว อายุ 24 ชม.
 async function createLinkCode(c: Ctx) {
-	const code = randomCode(8);
-	const res = await c.env.DB.prepare(
-		`UPDATE tb_user SET link_code_hash = ?, link_code_expires = datetime('now', ?)
-		 WHERE user_id = ? AND project_id = ? AND is_active = 1`,
-	)
-		.bind(await sha256Hex(code), LINK_CODE_TTL, c.id, c.pid)
-		.run();
-	if (res.meta.changes === 0) throw notFound();
-	return json({ user_id: c.id, link_code: code, expires_in: 86_400 }, 201);
+	return json(await issueLinkCode(c.env, sha256Hex, c.id, c.pid), 201);
 }
 
 // ---------- Visitors ----------
@@ -317,7 +253,7 @@ async function adminCreateVisitor(c: Ctx) {
 	const houseId = optStr(c.body, "house_id", 64) ?? null;
 	let prefix = COMMON_AREA_PREFIX;
 	if (houseId) {
-		const house = await requireOccupiedHouse(c, houseId);
+		const house = await requireOccupiedHouse(c.env, c.pid, houseId);
 		if (!house.house_code) throw new HttpError(409, "HOUSE_CODE_MISSING", "house_id");
 		prefix = house.house_code;
 	}
@@ -328,6 +264,91 @@ async function adminCreateVisitor(c: Ctx) {
 async function adminRevokeVisitor(c: Ctx) {
 	await revokeVisitor(c.env, c.pid, c.id);
 	return json({ visitor_id: c.id, id_status: "REVOKED" });
+}
+
+// ---------- Root: โครงการ + Admin ----------
+
+// policy ตั้งต้นของโครงการใหม่ (เหมือน AAASQL/seeds/default_policy.sql)
+const DEFAULT_POLICY: [string, Method][] = [
+	["RESIDENT", "ANPR"], ["RESIDENT", "RFID"], ["RESIDENT", "QRCODE"], ["RESIDENT", "PIN"],
+	["RESIDENT_OVERDUE", "RFID"], ["RESIDENT_OVERDUE", "PIN"],
+	["RESIDENT_OVERDUE_SEVERE", "PIN"],
+	["VISITOR", "QRCODE"], ["VISITOR", "PIN"],
+];
+
+function requireRoot(c: Ctx) {
+	if (c.level !== "ROOT") throw new HttpError(403, "FORBIDDEN");
+}
+
+async function listProjects(c: Ctx) {
+	requireRoot(c);
+	const { results } = await c.env.DB.prepare(
+		`SELECT p.project_id, p.project_code, p.project_name, p.is_active,
+		   (SELECT COUNT(*) FROM tb_house h WHERE h.project_id = p.project_id) AS houses,
+		   (SELECT COUNT(*) FROM tb_admin a WHERE a.project_id = p.project_id AND a.is_active = 1) AS admins
+		 FROM tb_project p ORDER BY p.project_code`,
+	).all();
+	return json({ projects: results });
+}
+
+// โครงการใหม่ + policy ตั้งต้น (ไม่มี policy = ปฏิเสธทุกคน)
+async function createProject(c: Ctx) {
+	requireRoot(c);
+	const code = normalizeProjectCode(c.body.project_code);
+	if (!code) throw badField("project_code");
+	const projectId = crypto.randomUUID();
+	const db = c.env.DB;
+	await db.batch([
+		db.prepare("INSERT INTO tb_project (project_id, project_name, project_code) VALUES (?, ?, ?)").bind(
+			projectId,
+			reqStr(c.body, "project_name", 128),
+			code,
+		),
+		...DEFAULT_POLICY.map(([s, m]) =>
+			db.prepare("INSERT INTO tb_policy (project_id, subject_type, method) VALUES (?, ?, ?)").bind(projectId, s, m),
+		),
+	]);
+	return json({ project_id: projectId, project_code: code }, 201);
+}
+
+async function listAdmins(c: Ctx) {
+	requireRoot(c);
+	const { results } = await c.env.DB.prepare(
+		`SELECT a.admin_id, a.ref, a.admin_name, a.admin_level, a.is_active, p.project_code, p.project_name
+		 FROM tb_admin a JOIN tb_project p ON p.project_id = a.project_id ORDER BY p.project_code, a.autoID`,
+	).all();
+	return json({ admins: results });
+}
+
+// Root สร้าง ADMIN ประจำโครงการ (Root เพิ่มด้วย SQL เท่านั้น); ref = <project_code>-ANN
+async function createAdmin(c: Ctx) {
+	requireRoot(c);
+	const code = normalizeProjectCode(c.body.project_code);
+	const project = code && (await c.env.DB.prepare("SELECT project_id FROM tb_project WHERE project_code = ?").bind(code).first<{ project_id: string }>());
+	if (!project) throw badField("project_code");
+	const adminName = reqStr(c.body, "admin_name", 128);
+	const password = reqStr(c.body, "password", 256);
+	if (password.length < 12) throw badField("password");
+	const hash = await hashPassword(password);
+	const count = (await c.env.DB.prepare("SELECT COUNT(*) AS n FROM tb_admin WHERE project_id = ? AND admin_level = 'ADMIN'").bind(project.project_id).first<number>("n")) ?? 0;
+	const adminId = crypto.randomUUID();
+	const ref = `${code}-A${String(count + 1).padStart(2, "0")}`;
+	try {
+		await c.env.DB.prepare("INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password, admin_level, ref) VALUES (?, ?, ?, ?, 'ADMIN', ?)")
+			.bind(adminId, project.project_id, adminName, hash, ref)
+			.run();
+	} catch (err) {
+		if (isUniqueViolation(err)) throw new HttpError(409, "ADMIN_EXISTS", "admin_name");
+		throw err;
+	}
+	return json({ admin_id: adminId, ref }, 201);
+}
+
+async function deactivateAdmin(c: Ctx) {
+	requireRoot(c);
+	const res = await c.env.DB.prepare("UPDATE tb_admin SET is_active = 0 WHERE admin_id = ? AND admin_level = 'ADMIN'").bind(c.id).run();
+	if (res.meta.changes === 0) throw notFound();
+	return json({ admin_id: c.id, is_active: 0 });
 }
 
 // ---------- Routing / Auth ----------
@@ -351,6 +372,11 @@ const ROUTES = [
 	route("DELETE", "/vehicles/:id", removeVehicle),
 	route("POST", "/houses/:id/credentials", addCredential),
 	route("DELETE", "/credentials/:id", revokeCredential),
+	route("GET", "/projects", listProjects),
+	route("POST", "/projects", createProject),
+	route("GET", "/admins", listAdmins),
+	route("POST", "/admins", createAdmin),
+	route("DELETE", "/admins/:id", deactivateAdmin),
 	route("GET", "/visitors", adminListVisitors),
 	route("POST", "/visitors", adminCreateVisitor),
 	route("DELETE", "/visitors/:id", adminRevokeVisitor),
@@ -360,11 +386,12 @@ interface AdminRow {
 	admin_id: string;
 	project_id: string;
 	admin_password: string;
+	admin_level: string;
 }
 
 const getActiveAdmin = (env: Env, adminId: string) =>
 	env.DB.prepare(
-		"SELECT admin_id, project_id, admin_password FROM tb_admin WHERE admin_id = ? AND is_active = 1 AND id_status = 'ACTIVE'",
+		"SELECT admin_id, project_id, admin_password, admin_level FROM tb_admin WHERE admin_id = ? AND is_active = 1 AND id_status = 'ACTIVE'",
 	)
 		.bind(adminId)
 		.first<AdminRow>();
@@ -384,11 +411,11 @@ async function login(req: Request, env: Env): Promise<Response> {
 	if (!projectCode || !isStr(body?.admin_name, 128) || !isStr(body?.password, 256)) return json({ error: "BAD_REQUEST" }, 400);
 
 	const admin = await env.DB.prepare(
-		`SELECT a.admin_id, a.project_id, a.admin_password FROM tb_admin a JOIN tb_project p ON p.project_id = a.project_id
+		`SELECT a.admin_id, a.project_id, a.admin_password, a.admin_level, p.project_name FROM tb_admin a JOIN tb_project p ON p.project_id = a.project_id
 		 WHERE p.project_code = ? AND p.is_active = 1 AND a.admin_name = ? AND a.is_active = 1 AND a.id_status = 'ACTIVE'`,
 	)
 		.bind(projectCode, body.admin_name)
-		.first<AdminRow>();
+		.first<AdminRow & { project_name: string }>();
 	const ok = await verifyPassword(body.password, admin?.admin_password ?? DUMMY_HASH);
 	if (!admin || !ok) return json({ error: "INVALID_LOGIN" }, 401);
 
@@ -403,7 +430,7 @@ async function login(req: Request, env: Env): Promise<Response> {
 		exp: now + ADMIN_TTL_SEC,
 	});
 	await writeAudit(env, admin.project_id, "ADMIN", admin.admin_id, "LOGIN", admin.admin_id, {});
-	return json({ access_token: token, token_type: "Bearer", expires_in: ADMIN_TTL_SEC, project_code: projectCode });
+	return json({ access_token: token, token_type: "Bearer", expires_in: ADMIN_TTL_SEC, project_code: projectCode, project_name: admin.project_name, admin_level: admin.admin_level });
 }
 
 export async function handleAdmin(req: Request, env: Env): Promise<Response> {
@@ -420,16 +447,26 @@ export async function handleAdmin(req: Request, env: Env): Promise<Response> {
 	const admin = claims && (await getActiveAdmin(env, claims.sub));
 	if (!claims || !admin || admin.project_id !== claims.pid) return json({ error: "UNAUTHORIZED" }, 401);
 
+	// ROOT จัดการโครงการอื่นได้ด้วย header X-Project-Code (ไม่ส่ง = โครงการของตัวเอง); ADMIN ใช้ของตัวเองเสมอ
+	let pid = admin.project_id;
+	const asProject = req.headers.get("X-Project-Code");
+	if (admin.admin_level === "ROOT" && asProject) {
+		const code = normalizeProjectCode(asProject);
+		const target = code && (await env.DB.prepare("SELECT project_id FROM tb_project WHERE project_code = ?").bind(code).first<{ project_id: string }>());
+		if (!target) return json({ error: "PROJECT_NOT_FOUND" }, 404);
+		pid = target.project_id;
+	}
+
 	const needsBody = req.method === "POST" || req.method === "PATCH";
 	const body = needsBody ? await readJson(req) : {};
 	if (!body) return json({ error: "BAD_REQUEST" }, 400);
 
 	try {
 		const id = decodeURIComponent(match.m.pathname.groups.id ?? "");
-		const res = await match.r.handler({ env, adminId: admin.admin_id, pid: admin.project_id, id, body, url });
+		const res = await match.r.handler({ env, adminId: admin.admin_id, level: admin.admin_level, pid, id, body, url });
 		if (req.method !== "GET" && res.ok) {
 			const action = `${req.method} ${match.r.pattern.pathname}`;
-			await writeAudit(env, admin.project_id, "ADMIN", admin.admin_id, action, await auditTarget(res, id), body);
+			await writeAudit(env, pid, "ADMIN", admin.admin_id, action, await auditTarget(res, id), body);
 		}
 		return res;
 	} catch (err) {

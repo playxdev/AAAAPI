@@ -105,10 +105,14 @@ export async function listVisitors(env: Env, projectId: string, houseId: string 
 	return results;
 }
 
-// เพิกถอน visitor และ credential ทั้งหมดของ visitor นั้น; houseId บังคับให้เป็นของบ้านนั้นเท่านั้น
-export async function revokeVisitor(env: Env, projectId: string, visitorId: string, houseId?: string) {
-	const houseFilter = houseId === undefined ? "" : " AND house_id = ?";
-	const args = houseId === undefined ? [visitorId, projectId] : [visitorId, projectId, houseId];
+// เพิกถอน visitor และ credential ทั้งหมดของ visitor นั้น; houseId / issuedById = เฉพาะของบ้านนั้น / ที่คนนั้นออกเท่านั้น
+export async function revokeVisitor(env: Env, projectId: string, visitorId: string, houseId?: string, issuedById?: string) {
+	let houseFilter = houseId === undefined ? "" : " AND house_id = ?";
+	const args: unknown[] = houseId === undefined ? [visitorId, projectId] : [visitorId, projectId, houseId];
+	if (issuedById !== undefined) {
+		houseFilter += " AND issued_by_type = 'OWNER' AND issued_by_id = ?";
+		args.push(issuedById);
+	}
 	const [visitor] = await env.DB.batch([
 		env.DB.prepare(`UPDATE tb_visitor SET is_active = 0, id_status = 'REVOKED' WHERE visitor_id = ? AND project_id = ?${houseFilter}`).bind(
 			...args,

@@ -1,7 +1,8 @@
+import { addCredential, credentialColumns, createHouseUser, issueLinkCode, MEMBER_ROLES, revokeCredential } from "./access";
 import { auditTarget, writeAudit } from "./audit";
 import { JWT_ISS, sha256Hex, signJwt, verifyJwt } from "./crypto";
 import { issueGuest, listVisitors, revokeVisitor } from "./guest";
-import { type Body, errorResponse, HttpError, isStr, isUniqueViolation, json, readJson } from "./http";
+import { type Body, errorResponse, HttpError, isStr, isUniqueViolation, json, notFound, readJson } from "./http";
 
 const OWNER_AUD = "aaa-owner";
 const OWNER_TTL_SEC = 60 * 60;
@@ -75,8 +76,11 @@ async function link(req: Request, env: Env): Promise<Response> {
 	return json(await issueOwnerToken(env, user.user_id, user.project_id));
 }
 
+// คนในบ้านทุกสถานะ (OWNER / FAMILY / RESIDENT / TENANT) ที่ผูก LINE แล้ว; ไม่เห็นรหัสโครงการ
 interface Owner {
 	user_id: string;
+	ref: string | null;
+	role: string;
 	project_id: string;
 	full_name: string;
 	house_id: string | null;
@@ -99,7 +103,8 @@ function requireHouse(owner: Owner): string {
 }
 
 async function me(c: Ctx) {
-	return json(c.owner);
+	const { project_id: _pid, ...me } = c.owner;
+	return json(me);
 }
 
 // ลูกบ้านเห็นเฉพาะ visitor ของบ้านตัวเอง
@@ -122,9 +127,74 @@ async function ownerCreateVisitor(c: Ctx) {
 	return json(result, 201);
 }
 
+// เพิกถอนได้เฉพาะ visitor ที่ตัวเองออก
 async function ownerRevokeVisitor(c: Ctx) {
-	await revokeVisitor(c.env, c.owner.project_id, c.id, requireHouse(c.owner));
+	await revokeVisitor(c.env, c.owner.project_id, c.id, requireHouse(c.owner), c.owner.user_id);
 	return json({ visitor_id: c.id, id_status: "REVOKED" });
+}
+
+// ---------- บ้านของฉัน ----------
+
+const requireOwner = (o: Owner) => {
+	if (o.role !== "OWNER") throw new HttpError(403, "OWNER_ONLY");
+};
+
+// สมาชิก + รถ (ดูอย่างเดียว) + PIN / QR / RFID ของบ้าน (ไม่มีค่าจริง); mine = รายการที่ฉันสร้าง ลบได้
+async function myHouse(c: Ctx) {
+	const houseId = requireHouse(c.owner);
+	const db = c.env.DB;
+	const [members, vehicles, credentials] = await db.batch<Record<string, unknown>>([
+		db.prepare(
+			`SELECT user_id, ref, full_name, phone_number, role, line_user_id IS NOT NULL AS line_linked FROM tb_user
+			 WHERE house_id = ? AND is_active = 1 ORDER BY CASE role WHEN 'OWNER' THEN 0 ELSE 1 END, autoID`,
+		).bind(houseId),
+		db.prepare("SELECT vehicle_id, license_plate, province, brand, color, label FROM tb_vehicle WHERE house_id = ? AND is_active = 1").bind(houseId),
+		db.prepare(`SELECT ${credentialColumns} FROM tb_credential WHERE house_id = ? AND is_active = 1 ORDER BY autoID DESC`).bind(houseId),
+	]);
+	const { project_id: _pid, ...me } = c.owner;
+	return json({
+		...me,
+		members: members.results,
+		vehicles: vehicles.results,
+		credentials: credentials.results.map((x) => ({ ...x, mine: x.issued_by_type === "OWNER" && x.issued_by_id === c.owner.user_id })),
+	});
+}
+
+// เจ้าบ้านเพิ่มสมาชิก (ลูกบ้าน / ผู้พักอาศัย / ผู้เช่า) แล้วได้รหัสเชิญ LINE ทันที
+async function addMember(c: Ctx) {
+	requireOwner(c.owner);
+	const houseId = requireHouse(c.owner);
+	const member = await createHouseUser(c.env, c.owner.project_id, houseId, c.body, MEMBER_ROLES, "FAMILY");
+	const link = await issueLinkCode(c.env, sha256Hex, member.user_id, c.owner.project_id);
+	return json({ ...member, link_code: link.link_code, expires_in: link.expires_in }, 201);
+}
+
+const memberWhere = " AND house_id = ? AND role <> 'OWNER'";
+
+async function memberLinkCode(c: Ctx) {
+	requireOwner(c.owner);
+	return json(await issueLinkCode(c.env, sha256Hex, c.id, c.owner.project_id, memberWhere, [requireHouse(c.owner)]), 201);
+}
+
+async function removeMember(c: Ctx) {
+	requireOwner(c.owner);
+	const res = await c.env.DB.prepare(`UPDATE tb_user SET is_active = 0 WHERE user_id = ? AND project_id = ? AND is_active = 1${memberWhere}`)
+		.bind(c.id, c.owner.project_id, requireHouse(c.owner))
+		.run();
+	if (res.meta.changes === 0) throw notFound();
+	return json({ user_id: c.id, is_active: 0 });
+}
+
+// คนในบ้านสร้าง PIN / QR เองได้ (RFID เฉพาะ Admin / Root)
+async function ownerAddCredential(c: Ctx) {
+	const res = await addCredential(c.env, c.owner.project_id, requireHouse(c.owner), { type: "OWNER", id: c.owner.user_id }, c.body, ["PIN", "QRCODE"]);
+	return json(res, 201);
+}
+
+// ลบได้เฉพาะที่ตัวเองสร้าง
+async function ownerRevokeCredential(c: Ctx) {
+	await revokeCredential(c.env, c.owner.project_id, c.id, { type: "OWNER", id: c.owner.user_id, houseId: requireHouse(c.owner) });
+	return json({ credential_id: c.id, id_status: "REVOKED" });
 }
 
 const route = (method: string, path: string, handler: (c: Ctx) => Promise<Response>) => ({
@@ -135,6 +205,12 @@ const route = (method: string, path: string, handler: (c: Ctx) => Promise<Respon
 
 const ROUTES = [
 	route("GET", "/me", me),
+	route("GET", "/house", myHouse),
+	route("POST", "/members", addMember),
+	route("POST", "/members/:id/link-code", memberLinkCode),
+	route("DELETE", "/members/:id", removeMember),
+	route("POST", "/credentials", ownerAddCredential),
+	route("DELETE", "/credentials/:id", ownerRevokeCredential),
 	route("GET", "/visitors", ownerListVisitors),
 	route("POST", "/visitors", ownerCreateVisitor),
 	route("DELETE", "/visitors/:id", ownerRevokeVisitor),
@@ -154,7 +230,7 @@ export async function handleOwner(req: Request, env: Env): Promise<Response> {
 	const owner =
 		claims &&
 		(await env.DB.prepare(
-			`SELECT u.user_id, u.project_id, u.full_name, u.house_id, h.house_number, h.house_code, h.occupancy_status
+			`SELECT u.user_id, u.ref, u.role, u.project_id, u.full_name, u.house_id, h.house_number, h.house_code, h.occupancy_status
 			 FROM tb_user u LEFT JOIN tb_house h ON h.house_id = u.house_id
 			 WHERE u.user_id = ? AND u.is_active = 1 AND u.line_user_id IS NOT NULL`,
 		)
