@@ -10,7 +10,7 @@ Production: `https://aaa-api.cookievirus.workers.dev`
 ```
 src/index.ts                 routing, CORS, device token, authorize endpoint, access log
 src/authorize.ts             ตัดสินสิทธิ์ (ANPR / credential / Guest Code / policy)
-src/admin.ts                 Admin API: login, บ้าน, ลูกบ้าน, รถ, บัตร/PIN, Visitor, รหัสผูก LINE
+src/admin.ts                 Admin API: login, บ้าน + ผู้ติดต่อ, รถ / บัตร / PIN / QR ของบ้าน, Visitor, รหัสผูก LINE
 src/owner.ts                 Owner API (LINE LIFF): login, ผูกบัญชี, ออก / เพิกถอน Guest Code
 src/guest.ts                 ออก Guest Code / Visitor (admin + owner ใช้ร่วมกัน)
 src/audit.ts                 tb_audit_log
@@ -41,8 +41,9 @@ Schema / migrations / seed อยู่ใน repo [AAASQL](https://github.com/p
 Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievirus, D1 `aaa-d1` region APAC)
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
-สถานะ production (2026-11-12, beta):
-- Migration `0001`–`0003` apply แล้ว, policy seed แล้ว
+สถานะ production (2026-11-25, beta):
+- Migration `0001`–`0004` apply แล้ว, policy seed แล้ว (`0004` = สิทธิ์เข้าออกเป็นของบ้าน, apply 2026-11-25
+  Time Travel bookmark ก่อน apply: `00000002-00000000-0000512e-1d3fb267a62c19c8230ce52ff558934c`)
 - Device ทดสอบของ SEMA: `SEMA-000-01` (`PRJ-000`, ทางเข้า)
 - โครงการ `PRJ-000` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
 - ล้างข้อมูลทดสอบแล้ว 2026-11-12 (เหลือโครงการ, admin, policy) ข้อมูลยังเป็น beta ล้างได้
@@ -82,7 +83,7 @@ npm test
 Header `Authorization: Bearer <JWT>`
 
 ```json
-{ "event_id": "evt-unique-id", "method": "ANPR", "value": "กก9999", "house_code": "9801", "direction": "ENTRY" }
+{ "event_id": "evt-unique-id", "method": "ANPR", "value": "กก9999", "province": "กรุงเทพมหานคร", "house_code": "9801", "direction": "ENTRY" }
 ```
 → `{ "event_id": "...", "decision": "YES|NO|ERROR", "house_number": "98/6", "reason_code": "...", "allowed_methods": ["RFID"], "policy_version": 1 }`
 
@@ -93,12 +94,15 @@ Header `Authorization: Bearer <JWT>`
 - `ERROR` ตอบ HTTP 500 และห้ามตีความเป็น `YES`
 - `house_code` ไม่บังคับ: ใช้ตรวจซ้ำว่า credential / ทะเบียนเป็นของบ้านนั้น ไม่ตรง → `NO` + `HOUSE_MISMATCH` รูปแบบผิด → 400
 - `direction` ไม่บังคับ: `ENTRY` / `EXIT` บันทึกลง `tb_access_log.access_type` (SEMA ตัวเดียวคุมทั้งฝั่งเข้า/ออก) ไม่ส่ง → ใช้ `tb_device.direction` ค่าอื่น → 400
-- บ้านที่ปิดใช้งาน (`tb_house.is_active = 0`): ลูกบ้านได้ `USER_INACTIVE`, Visitor ของบ้านนั้นได้ `VISITOR_NOT_VALID` (ทะเบียน = `UNKNOWN_PLATE`)
+- `province` ไม่บังคับ (ANPR เท่านั้น): จังหวัดที่กล้องอ่านได้ ใช้แยกรถเมื่อทะเบียนเดียวกันลงทะเบียนไว้หลายจังหวัด
+  ทะเบียนที่มีคันเดียวไม่สน `province` (กัน OCR จังหวัดผิด) แยกไม่ได้ → `NO` + `PLATE_AMBIGUOUS` (`กทม` / `กรุงเทพฯ` = `กรุงเทพมหานคร`)
+- บ้านที่ปิดใช้งาน (`tb_house.is_active = 0`): ทุกช่องทางของบ้านได้ `USER_INACTIVE`, Visitor ของบ้านนั้นได้ `VISITOR_NOT_VALID` (ทะเบียน = `UNKNOWN_PLATE`)
+- บ้านไม่มีผู้อยู่อาศัย (`tb_house.occupancy_status = 'VACANT'`): รถ / บัตร / PIN / QR / Guest Code ของบ้านได้ `HOUSE_VACANT` (ทะเบียน Visitor = `UNKNOWN_PLATE`)
 
 `reason_code`: `RESIDENT_ACTIVE`, `RESIDENT_OVERDUE_ALLOWED`, `VISITOR_VALID`, `RESIDENT_OVERDUE`, `RESIDENT_OVERDUE_SEVERE`,
 `METHOD_NOT_ALLOWED`, `BLACKLISTED`, `UNKNOWN_PLATE`, `UNKNOWN_CREDENTIAL`, `CREDENTIAL_REVOKED`,
-`CREDENTIAL_NOT_YET_VALID`, `CREDENTIAL_EXPIRED`, `CREDENTIAL_USED_UP`, `USER_INACTIVE`, `VISITOR_NOT_VALID`,
-`HOUSE_MISMATCH`, `TOO_MANY_ATTEMPTS`, `INTERNAL_ERROR`, `LOG_FAILED`
+`CREDENTIAL_NOT_YET_VALID`, `CREDENTIAL_EXPIRED`, `CREDENTIAL_USED_UP`, `USER_INACTIVE`, `HOUSE_VACANT`, `VISITOR_NOT_VALID`,
+`PLATE_AMBIGUOUS`, `HOUSE_MISMATCH`, `TOO_MANY_ATTEMPTS`, `INTERNAL_ERROR`, `LOG_FAILED`
 
 `TOO_MANY_ATTEMPTS`: อุปกรณ์เดียวกันส่ง PIN / QR ที่ไม่รู้จัก (หรือ `HOUSE_MISMATCH`) ครบ 10 ครั้งใน 5 นาที จะปฏิเสธ PIN / QR ของอุปกรณ์นั้นจนพ้นช่วงเวลา
 (กันสุ่ม Guest Code) ANPR และ RFID ยังใช้ได้
@@ -111,45 +115,52 @@ Header `Authorization: Bearer <JWT>`
 | Method | Endpoint | Body / หมายเหตุ |
 |---|---|---|
 | `POST` | `/api/v1/admin/login` | `{ admin_name, password }` → `{ access_token, expires_in: 3600 }` |
-| `GET` | `/api/v1/admin/houses` | รายการบ้าน |
-| `POST` | `/api/v1/admin/houses` | `{ house_number, house_code?, zone_or_soi? }` |
-| `PATCH` | `/api/v1/admin/houses/:id` | `{ house_number?, house_code?, zone_or_soi?, payment_status?, is_active? }` |
-| `GET` | `/api/v1/admin/residents` | `?house_id=` กรองตามบ้านได้ |
-| `POST` | `/api/v1/admin/residents` | `{ house_id, full_name, phone_number?, line_id? }` |
-| `GET` | `/api/v1/admin/residents/:id` | ลูกบ้าน + รถ + credential (ไม่มี hash / ค่าจริง) |
-| `PATCH` | `/api/v1/admin/residents/:id` | `{ house_id?, full_name?, phone_number?, line_id?, is_active? }` |
-| `DELETE` | `/api/v1/admin/residents/:id` | ปิดใช้งาน (soft delete) เข้าไม่ได้ทุกวิธี |
-| `POST` | `/api/v1/admin/residents/:id/vehicles` | `{ license_plate, province?, brand?, color? }` ทะเบียนซ้ำในโครงการ → `409` |
+| `GET` | `/api/v1/admin/houses` | รายการบ้าน + `contacts[]` (เจ้าบ้านขึ้นก่อน = ผู้ติดต่อหลัก) |
+| `POST` | `/api/v1/admin/houses` | `{ house_number, house_code?, zone_or_soi?, occupancy_status? }` |
+| `GET` | `/api/v1/admin/houses/:id` | บ้าน + `contacts` + `vehicles` + `credentials` (ไม่มี hash / ค่าจริง) |
+| `PATCH` | `/api/v1/admin/houses/:id` | `{ house_number?, house_code?, zone_or_soi?, payment_status?, occupancy_status?, is_active? }` |
+| `POST` | `/api/v1/admin/houses/:id/contacts` | `{ full_name, phone_number?, role? }` `role` = `OWNER` / `RESIDENT` (ค่าเริ่มต้น) / `TENANT` |
+| `PATCH` | `/api/v1/admin/contacts/:id` | `{ full_name?, phone_number?, role? }` |
+| `DELETE` | `/api/v1/admin/contacts/:id` | ลบผู้ติดต่อ (soft delete) ไม่กระทบสิทธิ์เข้าออกของบ้าน บัญชี LINE ของเขาใช้ไม่ได้ |
+| `POST` | `/api/v1/admin/contacts/:id/link-code` | ออกรหัสผูก LINE 8 ตัว ใช้ครั้งเดียว อายุ 24 ชม. → `{ user_id, link_code }` |
+| `POST` | `/api/v1/admin/houses/:id/vehicles` | `{ license_plate, province?, brand?, color? }` ดู "ทะเบียนรถ" ด้านล่าง |
 | `DELETE` | `/api/v1/admin/vehicles/:id` | ปิดใช้งานรถ |
-| `POST` | `/api/v1/admin/residents/:id/credentials` | `{ cred_type: RFID\|QRCODE\|PIN, value, valid_from?, valid_until? }` PIN = ตัวเลข 4–8 หลัก, ซ้ำ → `409` |
+| `POST` | `/api/v1/admin/houses/:id/credentials` | `{ cred_type: RFID\|QRCODE\|PIN, value?, duration?, valid_from?, valid_until? }` ดู "บัตร / PIN / QR" ด้านล่าง |
 | `DELETE` | `/api/v1/admin/credentials/:id` | เพิกถอน (`REVOKED`) |
-| `POST` | `/api/v1/admin/residents/:id/link-code` | ออกรหัสผูก LINE 8 ตัว ใช้ครั้งเดียว อายุ 24 ชม. → `{ link_code }` |
 | `GET` | `/api/v1/admin/visitors` | `?house_id=` / `?valid=1` (เฉพาะที่ยังไม่หมดอายุ) |
-| `POST` | `/api/v1/admin/visitors` | `{ duration, house_id?, full_name?, phone_number?, license_plate?, purpose?, issue_code? }` ไม่ส่ง `house_id` = งานส่วนกลาง |
+| `POST` | `/api/v1/admin/visitors` | `{ duration, house_id?, full_name?, phone_number?, license_plate?, purpose?, issue_code? }` ไม่ส่ง `house_id` = งานส่วนกลาง, บ้าน `VACANT` → `409 HOUSE_VACANT` |
 | `DELETE` | `/api/v1/admin/visitors/:id` | เพิกถอน visitor + Guest Code |
 
+- สิทธิ์เข้าออก (รถ / บัตร / PIN / QR) เป็นของ **บ้าน** ไม่ใช่ของคน; `tb_user` = ผู้ติดต่อของบ้าน + บัญชี LINE
 - `payment_status`: `NORMAL` / `OVERDUE` / `OVERDUE_SEVERE`
+- `occupancy_status`: `OCCUPIED` (ค่าเริ่มต้น) / `VACANT` = ไม่มีผู้อยู่อาศัย: เพิ่มรถ / บัตร / Visitor ไม่ได้ (`409 HOUSE_VACANT`) และของเดิมใช้ไม่ได้จนกลับเป็น `OCCUPIED`
+- ทะเบียนรถ: หมวด + เลข 1–4 หลัก (`กข 1234`, `1กข 1234`, `รวย 9999`, `จ 12`) หรือรถบรรทุก / รถโดยสาร `70-1234` (เลข 2 + 4 หลัก)
+  ไม่ตรง → `400` (`field: license_plate`); เก็บแบบตัดช่องว่าง / ขีด; จังหวัดเก็บเป็นชื่อเต็ม
+  ทะเบียนเดียวกันต่างจังหวัด = คนละคัน; ซ้ำในจังหวัดเดียวกัน (หรือฝั่งใดไม่ระบุจังหวัด) → `409 PLATE_EXISTS`
+- บัตร / PIN / QR: PIN = ตัวเลข 4–8 หลัก; QRCODE = 20 ตัวจาก `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`
+  (ไม่ส่ง `value` = server สร้างให้, คืน `value` ครั้งเดียวใน response); ค่าซ้ำในโครงการ → `409 CREDENTIAL_EXISTS`
+  อายุ: `valid_until` (กำหนดเอง) > `duration` (`1d` / `7d` / `14d` / `30d` / `1y` / `forever` = ไม่มีวันหมดอายุ) > ไม่ส่ง = 24 ชั่วโมง
 - `house_code`: ตัวเลข 1–6 หลัก ไม่ขึ้นต้นด้วย 0 ไม่ซ้ำในโครงการ ต้องมีก่อนบ้านนั้นจะออก Guest Code ได้
 - Error: `{ "error": "BAD_REQUEST", "field": "<ชื่อ field>" }`, `NOT_FOUND`, `PLATE_EXISTS`, `CREDENTIAL_EXISTS`,
-  `HOUSE_CODE_MISSING`, `GUEST_CODE_UNAVAILABLE`, `CONFLICT`, `UNAUTHORIZED`
+  `HOUSE_CODE_MISSING`, `HOUSE_VACANT`, `GUEST_CODE_UNAVAILABLE`, `CONFLICT`, `UNAUTHORIZED`
 - ค่าของ RFID / QR / PIN ถูก hash ทันที อ่านค่าจริงกลับจาก API ไม่ได้
 
 ## Owner API (LINE LIFF)
 
-สำหรับลูกบ้าน / เจ้าของบ้าน เรียกจาก LIFF app ส่ง LIFF ID Token (`liff.getIDToken()`) มาแลก JWT
+สำหรับผู้ติดต่อของบ้าน (เจ้าบ้าน / ผู้อยู่อาศัย / ผู้เช่า) เรียกจาก LIFF app ส่ง LIFF ID Token (`liff.getIDToken()`) มาแลก JWT
 
 ผูกบัญชีครั้งแรก:
-1. Admin เรียก `POST /api/v1/admin/residents/:id/link-code` แล้วส่งรหัสให้ลูกบ้าน
-2. ลูกบ้านเปิด LIFF กรอกรหัส → LIFF เรียก `POST /api/v1/owner/link`
+1. Admin เรียก `POST /api/v1/admin/contacts/:id/link-code` แล้วส่งรหัสให้ผู้ติดต่อคนนั้น
+2. ผู้ติดต่อเปิด LIFF กรอกรหัส → LIFF เรียก `POST /api/v1/owner/link`
 3. ครั้งต่อไป LIFF เรียก `POST /api/v1/owner/login` ได้เลย
 
 | Method | Endpoint | Body / หมายเหตุ |
 |---|---|---|
 | `POST` | `/api/v1/owner/link` | `{ id_token, link_code }` → JWT; รหัสผิด / หมดอายุ → `400 INVALID_LINK_CODE`, LINE ผูกกับคนอื่นแล้ว → `409` |
 | `POST` | `/api/v1/owner/login` | `{ id_token }` → JWT; ยังไม่ผูก → `403 NOT_LINKED` |
-| `GET` | `/api/v1/owner/me` | ข้อมูลลูกบ้าน + บ้าน + `house_code` |
+| `GET` | `/api/v1/owner/me` | ข้อมูลผู้ติดต่อ + บ้าน + `house_code` + `occupancy_status` |
 | `GET` | `/api/v1/owner/visitors` | visitor ของบ้านตัวเองเท่านั้น (`?valid=1`) |
-| `POST` | `/api/v1/owner/visitors` | `{ duration, full_name?, phone_number?, license_plate?, purpose? }` → `{ visitor_id, code, valid_until }` |
+| `POST` | `/api/v1/owner/visitors` | `{ duration, full_name?, phone_number?, license_plate?, purpose? }` → `{ visitor_id, code, valid_until }`; บ้าน `VACANT` → `409 HOUSE_VACANT` |
 | `DELETE` | `/api/v1/owner/visitors/:id` | เพิกถอน (เฉพาะ visitor ของบ้านตัวเอง) |
 
 ### Guest Code
@@ -184,5 +195,5 @@ API ของอุปกรณ์ (`/auth/device/token`, `/access/authorize`) �
 - `tb_device.device_secret_hash` = SHA-256 hex ของ device secret
 - `tb_credential.cred_hash` = HMAC-SHA256(`CRED_PEPPER`, `project_id:cred_type:value`) ดู `credentialHash()` ใน `src/authorize.ts`
 - เวลาใน `valid_from` / `valid_until` เป็น UTC
-- `tb_user.line_user_id` = LINE userId จาก LIFF (ไม่ใช่ `line_id`) 1 บัญชี LINE ผูกได้กับลูกบ้าน 1 คนเท่านั้น
-- PIN ของลูกบ้านห้ามซ้ำกับ Guest Code ที่ยังมีอยู่ (และกลับกัน) เพราะ Keypad ส่งมาเป็น method `PIN` เหมือนกัน
+- `tb_user.line_user_id` = LINE userId จาก LIFF (ไม่ใช่ `line_id`) 1 บัญชี LINE ผูกได้กับผู้ติดต่อ 1 คนเท่านั้น
+- PIN ของบ้านห้ามซ้ำกับ Guest Code ที่ยังมีอยู่ (และกลับกัน) เพราะ Keypad ส่งมาเป็น method `PIN` เหมือนกัน
