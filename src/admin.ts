@@ -7,11 +7,20 @@ import {
 	issueLinkCode,
 	requireOccupiedHouse,
 	revokeCredential as revokeHouseCredential,
+	updateCredential as updateHouseCredential,
 } from "./access";
 import { auditTarget, writeAudit } from "./audit";
-import { normalizePlate, normalizeProvince, type Method } from "./authorize";
+import { isThaiProvince, normalizePlate, normalizeProvince, PLATE_RE, type Method } from "./authorize";
 import { hashPassword, JWT_ISS, sha256Hex, signJwt, verifyJwt, verifyPassword } from "./crypto";
-import { COMMON_AREA_PREFIX, HOUSE_CODE_RE, issueGuest, listVisitors, revokeVisitor } from "./guest";
+import {
+	COMMON_AREA_CODE_RE,
+	DEFAULT_COMMON_AREA_CODE,
+	HOUSE_CODE_RE,
+	issueGuest,
+	listVisitors,
+	revokeVisitor,
+	updateVisitor,
+} from "./guest";
 import {
 	badField,
 	type Body,
@@ -181,36 +190,56 @@ async function removeContact(c: Ctx) {
 
 // ---------- Vehicles ----------
 
-async function addVehicle(c: Ctx) {
-	await requireOccupiedHouse(c.env, c.pid, c.id);
+// รถจาก body (ใช้ทั้งเพิ่มและแก้); exceptId = รถคันที่กำลังแก้ (ไม่นับว่าชนกับตัวเอง)
+async function parseVehicle(c: Ctx, exceptId = "") {
 	const plate = normalizePlate(reqStr(c.body, "license_plate", 32));
 	// หมวด (1กข / กข / รวย / 70) + เลข 1-4 หลัก; จังหวัดอยู่อีกช่อง
 	if (!PLATE_RE.test(plate)) throw badField("license_plate");
 	const province = normalizeProvince(optStr(c.body, "province", 64));
+	if (province && !isThaiProvince(province)) throw badField("province");
 	// ป้ายเดียวกันต่างจังหวัด = คนละคัน; ไม่ระบุจังหวัด = ชนกับทุกจังหวัด
 	const dup = await c.env.DB.prepare(
-		"SELECT 1 FROM tb_vehicle WHERE project_id = ? AND license_plate = ? AND is_active = 1 AND (? IS NULL OR province IS NULL OR province = ?)",
+		`SELECT 1 FROM tb_vehicle WHERE project_id = ? AND license_plate = ? AND is_active = 1 AND vehicle_id <> ?
+		   AND (? IS NULL OR province IS NULL OR province = ?)`,
 	)
-		.bind(c.pid, plate, province, province)
+		.bind(c.pid, plate, exceptId, province, province)
 		.first();
 	if (dup) throw new HttpError(409, "PLATE_EXISTS", "license_plate");
+	return {
+		license_plate: plate,
+		province,
+		brand: optStr(c.body, "brand", 64) ?? null,
+		color: optStr(c.body, "color", 32) ?? null,
+		label: optStr(c.body, "label", 32) ?? null,
+	};
+}
+
+async function addVehicle(c: Ctx) {
+	await requireOccupiedHouse(c.env, c.pid, c.id);
+	const v = await parseVehicle(c);
 
 	const vehicleId = crypto.randomUUID();
 	await c.env.DB.prepare(
 		"INSERT INTO tb_vehicle (vehicle_id, project_id, house_id, license_plate, province, brand, color, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 	)
-		.bind(
-			vehicleId,
-			c.pid,
-			c.id,
-			plate,
-			province,
-			optStr(c.body, "brand", 64) ?? null,
-			optStr(c.body, "color", 32) ?? null,
-			optStr(c.body, "label", 32) ?? null,
-		)
+		.bind(vehicleId, c.pid, c.id, v.license_plate, v.province, v.brand, v.color, v.label)
 		.run();
-	return json({ vehicle_id: vehicleId, license_plate: plate }, 201);
+	return json({ vehicle_id: vehicleId, license_plate: v.license_plate }, 201);
+}
+
+// แก้รถทั้งคัน (ฟอร์มส่งครบทุกช่อง); เปลี่ยนทะเบียนแล้ว ANPR ใช้ทะเบียนใหม่ทันที
+// label ไม่ส่ง = คงชื่อสั้นที่คนในบ้านตั้งไว้ (ชื่อสั้นเป็นหน้าที่ของคนในบ้าน)
+async function updateVehicle(c: Ctx) {
+	const v = await parseVehicle(c, c.id);
+	const keepLabel = c.body.label === undefined;
+	const res = await c.env.DB.prepare(
+		`UPDATE tb_vehicle SET license_plate = ?, province = ?, brand = ?, color = ?${keepLabel ? "" : ", label = ?"}
+		 WHERE vehicle_id = ? AND project_id = ? AND is_active = 1`,
+	)
+		.bind(v.license_plate, v.province, v.brand, v.color, ...(keepLabel ? [] : [v.label]), c.id, c.pid)
+		.run();
+	if (res.meta.changes === 0) throw notFound();
+	return json({ vehicle_id: c.id, license_plate: v.license_plate });
 }
 
 async function removeVehicle(c: Ctx) {
@@ -225,6 +254,12 @@ async function addCredential(c: Ctx) {
 	return json(await addHouseCredential(c.env, c.pid, c.id, { type: "ADMIN", id: c.adminId }, c.body, ADMIN_CRED_TYPES), 201);
 }
 
+// แก้ชื่อสั้น / ระยะเวลา (ตัวรหัสแก้ไม่ได้ เก็บเป็น hash)
+async function updateCredential(c: Ctx) {
+	await updateHouseCredential(c.env, c.pid, c.id, c.body);
+	return json({ credential_id: c.id });
+}
+
 // Admin / Root ลบได้ทุกรายการในโครงการ
 async function revokeCredential(c: Ctx) {
 	await revokeHouseCredential(c.env, c.pid, c.id);
@@ -233,8 +268,6 @@ async function revokeCredential(c: Ctx) {
 
 // ---------- LINE link code ----------
 
-// truck/bus: 2-digit category + exactly 4 digits, otherwise a pure number like "1234" would pass
-const PLATE_RE = /^(\d?[ก-ฮ]{1,3}\d{1,4}|\d{6})$/;
 // รหัสเชื่อม LINE ของคนในบ้าน (ปกติ = เจ้าบ้าน) ใช้ครั้งเดียว อายุ 24 ชม.
 async function createLinkCode(c: Ctx) {
 	return json(await issueLinkCode(c.env, sha256Hex, c.id, c.pid), 201);
@@ -251,7 +284,10 @@ async function adminListVisitors(c: Ctx) {
 // house_id ไม่ส่ง / null = ผู้เยี่ยมชมงานส่วนกลาง (Guest Code ขึ้นต้นด้วย 0)
 async function adminCreateVisitor(c: Ctx) {
 	const houseId = optStr(c.body, "house_id", 64) ?? null;
-	let prefix = COMMON_AREA_PREFIX;
+	// งานส่วนกลาง = รหัสพื้นที่ส่วนกลางของโครงการ (ค่าเริ่มต้น 0000)
+	let prefix =
+		(await c.env.DB.prepare("SELECT common_area_code FROM tb_project WHERE project_id = ?").bind(c.pid).first<string>("common_area_code")) ??
+		DEFAULT_COMMON_AREA_CODE;
 	if (houseId) {
 		const house = await requireOccupiedHouse(c.env, c.pid, houseId);
 		if (!house.house_code) throw new HttpError(409, "HOUSE_CODE_MISSING", "house_id");
@@ -261,9 +297,56 @@ async function adminCreateVisitor(c: Ctx) {
 	return json(await issueGuest(c.env, c.pid, { houseId, prefix, issuedBy: "ADMIN", issuedById: c.adminId, issueCode }, c.body), 201);
 }
 
+async function adminUpdateVisitor(c: Ctx) {
+	await updateVisitor(c.env, c.pid, c.id, c.body);
+	return json({ visitor_id: c.id });
+}
+
 async function adminRevokeVisitor(c: Ctx) {
 	await revokeVisitor(c.env, c.pid, c.id);
 	return json({ visitor_id: c.id, id_status: "REVOKED" });
+}
+
+// ---------- Access log ----------
+
+// การเข้าออกของโครงการ ใหม่สุดก่อน (Dashboard / รายงาน); ไม่มีค่า PIN / QR (มีแค่ label ของรายการ)
+// ?limit= 1-1000 (ค่าเริ่มต้น 20) &from= &to= (เวลา UTC แบบ SQLite / ISO) &decision=YES|NO|ERROR &method=ANPR|RFID|QRCODE|PIN
+async function listAccessLogs(c: Ctx) {
+	const q = c.url.searchParams;
+	const limit = Math.min(Math.max(Math.trunc(Number(q.get("limit"))) || 20, 1), 1000);
+	const where = ["l.project_id = ?"];
+	const args: unknown[] = [c.pid];
+	for (const [param, sql] of [
+		["from", "datetime(l.timestamp) >= datetime(?)"],
+		["to", "datetime(l.timestamp) <= datetime(?)"],
+	] as const) {
+		const v = q.get(param);
+		if (!v) continue;
+		if (Number.isNaN(Date.parse(v))) throw badField(param);
+		where.push(sql);
+		args.push(v.replace("T", " ").replace("Z", "").slice(0, 19));
+	}
+	for (const [param, allowed] of [
+		["decision", ["YES", "NO", "ERROR"]],
+		["method", ["ANPR", "RFID", "QRCODE", "PIN"]],
+	] as const) {
+		const v = q.get(param);
+		if (!v) continue;
+		if (!(allowed as readonly string[]).includes(v)) throw badField(param);
+		where.push(`l.${param} = ?`);
+		args.push(v);
+	}
+	const { results } = await c.env.DB.prepare(
+		`SELECT l.log_id, l.timestamp, l.access_type, l.method, l.decision, l.reason_code, l.license_plate, l.house_number,
+		   d.gate_name, cr.cred_type, cr.label AS credential_label
+		 FROM tb_access_log l
+		 LEFT JOIN tb_device d ON d.device_id = l.device_id
+		 LEFT JOIN tb_credential cr ON cr.credential_id = l.credential_ref
+		 WHERE ${where.join(" AND ")} ORDER BY l.timestamp DESC, l.autoID DESC LIMIT ?`,
+	)
+		.bind(...args, limit)
+		.all();
+	return json({ logs: results });
 }
 
 // ---------- Root: โครงการ + Admin ----------
@@ -283,7 +366,7 @@ function requireRoot(c: Ctx) {
 async function listProjects(c: Ctx) {
 	requireRoot(c);
 	const { results } = await c.env.DB.prepare(
-		`SELECT p.project_id, p.project_code, p.project_name, p.is_active,
+		`SELECT p.project_id, p.project_code, p.project_name, p.common_area_code, p.is_active,
 		   (SELECT COUNT(*) FROM tb_house h WHERE h.project_id = p.project_id) AS houses,
 		   (SELECT COUNT(*) FROM tb_admin a WHERE a.project_id = p.project_id AND a.is_active = 1) AS admins
 		 FROM tb_project p ORDER BY p.project_code`,
@@ -296,19 +379,41 @@ async function createProject(c: Ctx) {
 	requireRoot(c);
 	const code = normalizeProjectCode(c.body.project_code);
 	if (!code) throw badField("project_code");
+	const common = optStr(c.body, "common_area_code", 6) ?? DEFAULT_COMMON_AREA_CODE;
+	if (!COMMON_AREA_CODE_RE.test(common)) throw badField("common_area_code");
 	const projectId = crypto.randomUUID();
 	const db = c.env.DB;
 	await db.batch([
-		db.prepare("INSERT INTO tb_project (project_id, project_name, project_code) VALUES (?, ?, ?)").bind(
+		db.prepare("INSERT INTO tb_project (project_id, project_name, project_code, common_area_code) VALUES (?, ?, ?, ?)").bind(
 			projectId,
 			reqStr(c.body, "project_name", 128),
 			code,
+			common,
 		),
 		...DEFAULT_POLICY.map(([s, m]) =>
 			db.prepare("INSERT INTO tb_policy (project_id, subject_type, method) VALUES (?, ?, ?)").bind(projectId, s, m),
 		),
 	]);
 	return json({ project_id: projectId, project_code: code }, 201);
+}
+
+// ตั้งค่าโครงการ (master): ชื่อ + รหัสพื้นที่ส่วนกลาง; :id = project_code
+async function updateProject(c: Ctx) {
+	requireRoot(c);
+	const code = normalizeProjectCode(c.id);
+	const common = optStr(c.body, "common_area_code", 6);
+	if (common !== undefined && (common === null || !COMMON_AREA_CODE_RE.test(common))) throw badField("common_area_code");
+	const sets: Record<string, unknown> = {
+		project_name: c.body.project_name === undefined ? undefined : reqStr(c.body, "project_name", 128),
+		common_area_code: common,
+	};
+	const cols = Object.keys(sets).filter((k) => sets[k] !== undefined);
+	if (!code || cols.length === 0) throw badField("body");
+	const res = await c.env.DB.prepare(`UPDATE tb_project SET ${cols.map((k) => `${k} = ?`).join(", ")} WHERE project_code = ?`)
+		.bind(...cols.map((k) => sets[k]), code)
+		.run();
+	if (res.meta.changes === 0) throw notFound();
+	return json({ project_code: code });
 }
 
 async function listAdmins(c: Ctx) {
@@ -402,7 +507,9 @@ const ROUTES = [
 	route("DELETE", "/contacts/:id", removeContact),
 	route("POST", "/contacts/:id/link-code", createLinkCode),
 	route("POST", "/houses/:id/vehicles", addVehicle),
+	route("PATCH", "/vehicles/:id", updateVehicle),
 	route("DELETE", "/vehicles/:id", removeVehicle),
+	route("PATCH", "/credentials/:id", updateCredential),
 	route("POST", "/houses/:id/credentials", addCredential),
 	route("DELETE", "/credentials/:id", revokeCredential),
 	route("GET", "/projects", listProjects),
@@ -412,9 +519,12 @@ const ROUTES = [
 	route("DELETE", "/admins/:id", deactivateAdmin),
 	route("POST", "/admins/:id/reset-password", resetAdminPassword),
 	route("POST", "/me/password", changeMyPassword),
+	route("GET", "/access-logs", listAccessLogs),
 	route("GET", "/visitors", adminListVisitors),
 	route("POST", "/visitors", adminCreateVisitor),
+	route("PATCH", "/visitors/:id", adminUpdateVisitor),
 	route("DELETE", "/visitors/:id", adminRevokeVisitor),
+	route("PATCH", "/projects/:id", updateProject),
 ];
 
 interface AdminRow {

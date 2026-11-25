@@ -1,4 +1,13 @@
-import { addCredential, credentialColumns, createHouseUser, issueLinkCode, MEMBER_ROLES, revokeCredential } from "./access";
+import {
+	addCredential,
+	credentialColumns,
+	createHouseUser,
+	issueLinkCode,
+	MEMBER_ROLES,
+	relabel,
+	revokeCredential,
+	updateCredential,
+} from "./access";
 import { auditTarget, writeAudit } from "./audit";
 import { JWT_ISS, sha256Hex, signJwt, verifyJwt } from "./crypto";
 import { issueGuest, listVisitors, revokeVisitor } from "./guest";
@@ -191,6 +200,24 @@ async function ownerAddCredential(c: Ctx) {
 	return json(res, 201);
 }
 
+// แก้ชื่อสั้น / ระยะเวลา ได้เฉพาะที่ตัวเองสร้าง; เจ้าบ้านตั้งชื่อสั้นได้ทุกรายการในบ้าน (รวมบัตร RFID ที่ Admin เพิ่ม)
+async function ownerUpdateCredential(c: Ctx) {
+	const labelOnly = Object.keys(c.body).every((k) => k === "label");
+	if (c.owner.role === "OWNER" && labelOnly) {
+		await relabel(c.env, requireHouse(c.owner), "tb_credential", "credential_id", c.id, c.body);
+		return json({ credential_id: c.id });
+	}
+	await updateCredential(c.env, c.owner.project_id, c.id, c.body, { type: "OWNER", id: c.owner.user_id, houseId: requireHouse(c.owner) });
+	return json({ credential_id: c.id });
+}
+
+// เจ้าบ้านตั้งชื่อสั้นรถ (ทะเบียน / จังหวัด ฯลฯ ยังเป็นของ Admin)
+async function ownerRelabelVehicle(c: Ctx) {
+	requireOwner(c.owner);
+	await relabel(c.env, requireHouse(c.owner), "tb_vehicle", "vehicle_id", c.id, c.body);
+	return json({ vehicle_id: c.id });
+}
+
 // ลบได้เฉพาะที่ตัวเองสร้าง
 async function ownerRevokeCredential(c: Ctx) {
 	await revokeCredential(c.env, c.owner.project_id, c.id, { type: "OWNER", id: c.owner.user_id, houseId: requireHouse(c.owner) });
@@ -210,6 +237,8 @@ const ROUTES = [
 	route("POST", "/members/:id/link-code", memberLinkCode),
 	route("DELETE", "/members/:id", removeMember),
 	route("POST", "/credentials", ownerAddCredential),
+	route("PATCH", "/credentials/:id", ownerUpdateCredential),
+	route("PATCH", "/vehicles/:id", ownerRelabelVehicle),
 	route("DELETE", "/credentials/:id", ownerRevokeCredential),
 	route("GET", "/visitors", ownerListVisitors),
 	route("POST", "/visitors", ownerCreateVisitor),
@@ -238,7 +267,7 @@ export async function handleOwner(req: Request, env: Env): Promise<Response> {
 			.first<Owner>());
 	if (!claims || !owner || owner.project_id !== claims.pid) return json({ error: "UNAUTHORIZED" }, 401);
 
-	const body = req.method === "POST" ? await readJson(req) : {};
+	const body = req.method === "POST" || req.method === "PATCH" ? await readJson(req) : {};
 	if (!body) return json({ error: "BAD_REQUEST" }, 400);
 
 	try {

@@ -1,12 +1,14 @@
-import { credentialHash, normalizePlate } from "./authorize";
-import { type Body, HttpError, isUniqueViolation, optStr, reqEnum } from "./http";
+import { credentialHash, isThaiProvince, normalizePlate, normalizeProvince, PLATE_RE } from "./authorize";
+import { badField, type Body, HttpError, isUniqueViolation, notFound, optBool, optStr, reqEnum } from "./http";
 import type { ActorType } from "./audit";
 
 // ระยะเวลาที่เลือกได้ (วัน); forever = 100 ปี
 export const DURATION_DAYS: Record<string, number> = { "1d": 1, "7d": 7, "14d": 14, "30d": 30, "1y": 365, forever: 36500 };
 
-// Guest Code ของงานส่วนกลาง (ไม่มีบ้าน) ใช้ prefix 0 ซึ่ง house_code ใช้ไม่ได้
-export const COMMON_AREA_PREFIX = "0";
+// Guest Code ของงานส่วนกลาง (ไม่มีบ้าน) ใช้ tb_project.common_area_code (ค่าเริ่มต้น 0000) เช่น 0000+1234
+// ต้องขึ้นต้นด้วย 0 จึงไม่ชนกับ house_code (ห้ามขึ้นต้นด้วย 0)
+export const DEFAULT_COMMON_AREA_CODE = "0000";
+export const COMMON_AREA_CODE_RE = /^0\d{0,5}$/;
 export const HOUSE_CODE_RE = /^[1-9]\d{0,5}$/;
 
 const MAX_CODE_ATTEMPTS = 10;
@@ -27,23 +29,26 @@ const sqlTime = (d: Date) => d.toISOString().replace("T", " ").slice(0, 19);
 // สร้าง Visitor (+ Guest Code ถ้า issueCode) จาก body: duration, full_name?, phone_number?, license_plate?, purpose?
 export async function issueGuest(env: Env, projectId: string, g: GuestRequest, body: Body) {
 	const days = DURATION_DAYS[reqEnum(body, "duration", Object.keys(DURATION_DAYS))];
-	const plate = optStr(body, "license_plate", 32);
+	const car = visitorVehicle(body);
 	const now = new Date();
 	const validFrom = sqlTime(now);
 	const validUntil = sqlTime(new Date(now.getTime() + days * 86_400_000));
 	const visitorId = crypto.randomUUID();
 
 	const insertVisitor = env.DB.prepare(
-		`INSERT INTO tb_visitor (visitor_id, project_id, house_id, full_name, phone_number, license_plate, purpose,
+		`INSERT INTO tb_visitor (visitor_id, project_id, house_id, full_name, phone_number, license_plate, province, brand, color, purpose,
 		   valid_from, valid_until, issued_by_type, issued_by_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	).bind(
 		visitorId,
 		projectId,
 		g.houseId,
 		optStr(body, "full_name", 128) ?? null,
 		optStr(body, "phone_number", 32) ?? null,
-		plate ? normalizePlate(plate) : null,
+		car.license_plate,
+		car.province,
+		car.brand,
+		car.color,
 		optStr(body, "purpose", 64) ?? null,
 		validFrom,
 		validUntil,
@@ -83,7 +88,54 @@ export async function issueGuest(env: Env, projectId: string, g: GuestRequest, b
 	throw new HttpError(409, "GUEST_CODE_UNAVAILABLE");
 }
 
-const VISITOR_COLS = `v.visitor_id, v.house_id, h.house_number, h.house_code, v.full_name, v.phone_number, v.license_plate,
+// รถของผู้มาติดต่อ (ไม่บังคับ) กติกาเดียวกับรถของบ้าน; จังหวัด / ยี่ห้อ / สี เก็บเมื่อมีทะเบียนเท่านั้น
+function visitorVehicle(body: Body) {
+	const raw = optStr(body, "license_plate", 32);
+	const plate = raw ? normalizePlate(raw) : null;
+	if (plate && !PLATE_RE.test(plate)) throw badField("license_plate");
+	const province = plate ? normalizeProvince(optStr(body, "province", 64)) : null;
+	if (province && !isThaiProvince(province)) throw badField("province");
+	return {
+		license_plate: plate,
+		province,
+		brand: plate ? (optStr(body, "brand", 64) ?? null) : null,
+		color: plate ? (optStr(body, "color", 32) ?? null) : null,
+	};
+}
+
+// แก้ข้อมูลผู้มาติดต่อ (ชื่อ / โทร / วัตถุประสงค์ / รถ / สถานะ) ไม่เปลี่ยนบ้าน อายุ และ Guest Code
+// is_active: false = เพิกถอน, true = ใช้ได้อีกครั้ง (Guest Code เดิมกลับมาใช้ได้ถ้ายังไม่หมดอายุ)
+export async function updateVisitor(env: Env, projectId: string, visitorId: string, body: Body) {
+	const active = optBool(body, "is_active");
+	const sets: Record<string, unknown> = {
+		full_name: optStr(body, "full_name", 128),
+		phone_number: optStr(body, "phone_number", 32),
+		purpose: optStr(body, "purpose", 64),
+		...(body.license_plate !== undefined && visitorVehicle(body)),
+		...(active !== undefined && { is_active: active ? 1 : 0, id_status: active ? "ACTIVE" : "REVOKED" }),
+	};
+	const cols = Object.keys(sets).filter((k) => sets[k] !== undefined);
+	if (cols.length === 0) throw badField("body");
+	const update = env.DB.prepare(
+		`UPDATE tb_visitor SET ${cols.map((k) => `${k} = ?`).join(", ")} WHERE visitor_id = ? AND project_id = ?`,
+	).bind(...cols.map((k) => sets[k]), visitorId, projectId);
+	// Guest Code ตามสถานะของ visitor
+	const codes =
+		active === undefined
+			? []
+			: [
+					env.DB.prepare("UPDATE tb_credential SET is_active = ?, id_status = ? WHERE visitor_id = ? AND project_id = ?").bind(
+						active ? 1 : 0,
+						active ? "ACTIVE" : "REVOKED",
+						visitorId,
+						projectId,
+					),
+				];
+	const [res] = await env.DB.batch([update, ...codes]);
+	if (res.meta.changes === 0) throw notFound();
+}
+
+const VISITOR_COLS = `v.visitor_id, v.house_id, h.house_number, h.house_code, v.full_name, v.phone_number, v.license_plate, v.province, v.brand, v.color,
 	v.purpose, v.valid_from, v.valid_until, v.issued_by_type, v.issued_by_id, v.is_active, v.id_status,
 	(v.is_active = 1 AND datetime('now') BETWEEN datetime(v.valid_from) AND datetime(v.valid_until)) AS is_valid_now`;
 

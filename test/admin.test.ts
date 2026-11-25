@@ -162,6 +162,35 @@ describe("house lifecycle", () => {
 		await call("PATCH", `/api/v1/admin/houses/${hid}`, t, { occupancy_status: "OCCUPIED" });
 		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "YES" });
 
+		// edit a vehicle (plate change moves ANPR to the new plate) and a credential's label / validity
+		const car2 = await call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: "ฮฮ 3333" });
+		expect((await call("PATCH", `/api/v1/admin/vehicles/${car2.body.vehicle_id}`, t, { license_plate: "ฮฮ 1111" })).body.error).toBe("PLATE_EXISTS");
+		expect((await call("PATCH", `/api/v1/admin/vehicles/${car2.body.vehicle_id}`, t, { license_plate: "ฮฮ 4444", province: "ชลบุรี", label: "รถพ่อ" })).status).toBe(200);
+		expect(await authorize("ANPR", "ฮฮ4444")).toMatchObject({ decision: "YES" });
+		expect(await authorize("ANPR", "ฮฮ3333")).toMatchObject({ decision: "NO", reason_code: "UNKNOWN_PLATE" });
+		expect((await call("PATCH", `/api/v1/admin/vehicles/${car2.body.vehicle_id}`, t, { license_plate: "ฮฮ 4444" })).status).toBe(200); // same plate is not a clash with itself
+		const qrEdit = (body: object) => call("PATCH", `/api/v1/admin/credentials/${qr.body.credential_id}`, t, body);
+		expect((await qrEdit({ label: "QR เพื่อน", duration: "forever" })).status).toBe(200);
+		expect((await call("GET", `/api/v1/admin/houses/${hid}`, t)).body.credentials.find((x: any) => x.credential_id === qr.body.credential_id))
+			.toMatchObject({ label: "QR เพื่อน", valid_until: null });
+		expect((await qrEdit({})).status).toBe(400);
+
+		// access log ล่าสุด (Dashboard): ใหม่สุดก่อน, มี label ของ PIN แต่ไม่มีค่า PIN
+		const logs = (await call("GET", "/api/v1/admin/access-logs?limit=500", t)).body.logs;
+		expect(logs.length).toBeLessThanOrEqual(100);
+		expect(logs[0]).toMatchObject({ method: "ANPR", decision: "NO", reason_code: "UNKNOWN_PLATE", license_plate: "ฮฮ3333" }); // newest first
+		expect(logs.find((l: any) => l.license_plate === "ฮฮ1111")).toMatchObject({ method: "ANPR", decision: "YES", house_number: "99/1" });
+		expect(logs.some((l: any) => l.credential_label === "pin ส่งของ" && l.decision === "YES")).toBe(true);
+		expect(JSON.stringify(logs)).not.toContain("9918172");
+		expect((await call("GET", "/api/v1/admin/access-logs", (await login("admin-b")).body.access_token)).body.logs).toHaveLength(0);
+		// report filters
+		const denied = (await call("GET", "/api/v1/admin/access-logs?limit=1000&decision=NO&method=ANPR", t)).body.logs;
+		expect(denied.length).toBeGreaterThan(0);
+		expect(denied.every((l: any) => l.decision === "NO" && l.method === "ANPR")).toBe(true);
+		expect((await call("GET", "/api/v1/admin/access-logs?from=2999-01-01T00:00:00Z", t)).body.logs).toHaveLength(0);
+		expect((await call("GET", "/api/v1/admin/access-logs?decision=MAYBE", t)).body.field).toBe("decision");
+		expect((await call("GET", "/api/v1/admin/access-logs?from=yesterday", t)).body.field).toBe("from");
+
 		// ปิดบ้าน -> เข้าไม่ได้ทุกวิธี
 		await call("PATCH", `/api/v1/admin/houses/${hid}`, t, { is_active: false });
 		expect(await authorize("ANPR", "ฮฮ1111")).toMatchObject({ decision: "NO", reason_code: "USER_INACTIVE" });
@@ -273,6 +302,13 @@ describe("root", () => {
 		const bHouses = (await call("GET", "/api/v1/admin/houses", (await login("admin-b")).body.access_token, undefined, { "X-Project-Code": "SNTW-BK01" })).body.houses;
 		expect(bHouses).toHaveLength(0);
 		expect((await call("GET", "/api/v1/admin/projects", root)).body.projects.map((x: any) => x.project_code)).toContain("SNTW-BK01");
+
+		// project master: name + common-area code (must start with 0, so it never clashes with a house code)
+		expect((await call("PATCH", "/api/v1/admin/projects/SNTW-BK01", root, { common_area_code: "0001", project_name: "แสนสิริ" })).status).toBe(200);
+		expect((await call("PATCH", "/api/v1/admin/projects/SNTW-BK01", root, { common_area_code: "1234" })).body.field).toBe("common_area_code");
+		expect((await call("PATCH", "/api/v1/admin/projects/SNTW-BK01", a.access_token, { project_name: "x" })).status).toBe(403);
+		const guest = await call("POST", "/api/v1/admin/visitors", root, { duration: "1d" }, { "X-Project-Code": "SNTW-BK01" });
+		expect(guest.body.code).toMatch(/^0001\+\d{4}$/);
 	});
 });
 

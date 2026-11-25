@@ -32,9 +32,15 @@ const residentSubject = (paymentStatus: string | null): Subject =>
 
 // ทะเบียนที่เก็บใน tb_vehicle / tb_visitor / tb_blacklist ต้อง normalize แบบเดียวกัน
 export const normalizePlate = (plate: string) => plate.replace(/[\s-]/g, "").toUpperCase();
+// ทะเบียนที่ลงทะเบียนได้ (หลัง normalizePlate): หมวด (1กข / กข / รวย) + เลข 1-4 หลัก หรือรถบรรทุก / รถโดยสาร 2 + 4 หลัก
+// (ถ้ายอมเลข 2 หลักนำหน้าทุกความยาว เลขล้วนอย่าง "1234" จะผ่าน)
+export const PLATE_RE = /^(\d?[ก-ฮ]{1,3}\d{1,4}|\d{6})$/;
 
 // ป้ายไทยซ้ำกันได้ข้ามจังหวัด: เก็บ/เทียบจังหวัดแบบตัดช่องว่าง และรวมชื่อย่อของกรุงเทพฯ
 const PROVINCE_ALIASES: Record<string, string> = { กทม: "กรุงเทพมหานคร", "กทม.": "กรุงเทพมหานคร", กรุงเทพ: "กรุงเทพมหานคร", กรุงเทพฯ: "กรุงเทพมหานคร" };
+// ป้ายทะเบียนไทยเป็นภาษาไทย: จังหวัดต้องเป็นตัวอักษรไทย (หลังตัดช่องว่าง / แปลงชื่อย่อ)
+export const isThaiProvince = (p: string) => /^[ก-๙]+$/.test(p);
+
 export const normalizeProvince = (province: string | undefined | null) => {
 	const p = province?.replace(/\s/g, "");
 	return p ? (PROVINCE_ALIASES[p] ?? p) : null;

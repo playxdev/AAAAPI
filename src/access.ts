@@ -62,12 +62,9 @@ export async function addCredential(env: Env, pid: string, houseId: string, issu
 	if (!credType) throw badField("cred_type");
 	const label = optStr(body, "label", LABEL_MAX) ?? null;
 
-	// วันหมดอายุ: valid_until (กำหนดเอง) > duration (forever = ไม่มีกำหนด / NULL) > ไม่ระบุ = 24 ชั่วโมง
-	const duration = optEnum(body, "duration", Object.keys(DURATION_DAYS));
-	const validUntil =
-		optStr(body, "valid_until", 40) ??
-		(duration === "forever" ? null : sqlTime(new Date(Date.now() + DURATION_DAYS[duration ?? "1d"] * 86_400_000)));
-	if (validUntil && Number.isNaN(Date.parse(validUntil))) throw badField("valid_until");
+	// null = ไม่มีกำหนด (forever) ต่างจาก undefined = ไม่ส่ง -> 24 ชั่วโมง (จึงใช้ ?? ไม่ได้)
+	const given = parseValidUntil(body);
+	const validUntil = given === undefined ? sqlTime(new Date(Date.now() + 86_400_000)) : given;
 	const validFrom = optStr(body, "valid_from", 40) ?? null;
 	if (validFrom && Number.isNaN(Date.parse(validFrom))) throw badField("valid_from");
 
@@ -136,6 +133,47 @@ export async function addCredential(env: Env, pid: string, houseId: string, issu
 		}
 	}
 	throw new HttpError(409, "CREDENTIAL_UNAVAILABLE", "value");
+}
+
+/**
+ * วันหมดอายุจาก body: valid_until (กำหนดเอง) > duration (forever = ไม่มีกำหนด / NULL, นับจากตอนนี้)
+ * ไม่ส่งทั้งคู่ = undefined (เพิ่มใหม่ = 24 ชั่วโมง, แก้ = ไม่เปลี่ยน)
+ */
+function parseValidUntil(body: Body): string | null | undefined {
+	const custom = optStr(body, "valid_until", 40);
+	if (custom) {
+		if (Number.isNaN(Date.parse(custom))) throw badField("valid_until");
+		return custom;
+	}
+	const duration = optEnum(body, "duration", Object.keys(DURATION_DAYS));
+	if (!duration) return undefined;
+	return duration === "forever" ? null : sqlTime(new Date(Date.now() + DURATION_DAYS[duration] * 86_400_000));
+}
+
+/** แก้ชื่อสั้น / ระยะเวลาของ PIN / QR / RFID; onlyIssuer = คนในบ้านแก้ได้แค่ที่ตัวเองสร้าง */
+export async function updateCredential(env: Env, pid: string, credentialId: string, body: Body, onlyIssuer?: Issuer & { houseId: string }) {
+	const sets: Record<string, unknown> = { label: optStr(body, "label", LABEL_MAX), valid_until: parseValidUntil(body) };
+	const cols = Object.keys(sets).filter((k) => sets[k] !== undefined);
+	if (cols.length === 0) throw badField("body");
+	const own = onlyIssuer ? " AND house_id = ? AND issued_by_type = ? AND issued_by_id = ?" : "";
+	const args = onlyIssuer ? [onlyIssuer.houseId, onlyIssuer.type, onlyIssuer.id] : [];
+	const res = await env.DB.prepare(
+		`UPDATE tb_credential SET ${cols.map((k) => `${k} = ?`).join(", ")}
+		 WHERE credential_id = ? AND project_id = ? AND visitor_id IS NULL AND is_active = 1${own}`,
+	)
+		.bind(...cols.map((k) => sets[k]), credentialId, pid, ...args)
+		.run();
+	if (res.meta.changes === 0) throw notFound();
+}
+
+/** ชื่อสั้นเป็นหน้าที่ของคนในบ้าน: เจ้าบ้านตั้งชื่อรถ / บัตร / รหัสได้ทุกรายการในบ้าน (รวมที่ Admin เพิ่มให้) */
+export async function relabel(env: Env, houseId: string, table: "tb_vehicle" | "tb_credential", idCol: string, id: string, body: Body) {
+	const label = optStr(body, "label", LABEL_MAX);
+	if (label === undefined) throw badField("label");
+	const res = await env.DB.prepare(`UPDATE ${table} SET label = ? WHERE ${idCol} = ? AND house_id = ? AND is_active = 1`)
+		.bind(label, id, houseId)
+		.run();
+	if (res.meta.changes === 0) throw notFound();
 }
 
 /** onlyIssuer: คนในบ้านลบได้แค่ที่ตัวเองสร้าง; ไม่ส่ง = Admin / Root ลบได้ทั้งโครงการ */

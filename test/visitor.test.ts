@@ -134,6 +134,13 @@ describe("guest codes", () => {
 
 		expect((await call("DELETE", `/api/v1/owner/visitors/${res.body.visitor_id}`, owner)).status).toBe(200);
 		expect(await gate("QRCODE", code)).toMatchObject({ decision: "NO", reason_code: "CREDENTIAL_REVOKED" });
+
+		// admin can set the status back: the same Guest Code works again (and revoke it once more)
+		const status = (is_active: boolean) => call("PATCH", `/api/v1/admin/visitors/${res.body.visitor_id}`, admin, { is_active });
+		expect((await status(true)).status).toBe(200);
+		expect(await gate("QRCODE", code)).toMatchObject({ decision: "YES" });
+		await status(false);
+		expect(await gate("QRCODE", code)).toMatchObject({ decision: "NO", reason_code: "CREDENTIAL_REVOKED" });
 	});
 
 	it("sets validity from duration and expires", async () => {
@@ -159,15 +166,26 @@ describe("guest codes", () => {
 
 	it("admin issues common-area codes (prefix 0) and plate-only visitors", async () => {
 		const event = await call("POST", "/api/v1/admin/visitors", admin, { duration: "1d", purpose: "งานส่วนกลาง", full_name: "Guest" });
-		expect(event.body.code).toMatch(/^0\+\d{4}$/);
+		expect(event.body.code).toMatch(/^0000\+\d{4}$/); // project common_area_code (default 0000)
 		expect(await gate("QRCODE", event.body.code)).toMatchObject({ decision: "YES" });
 
-		const car = await call("POST", "/api/v1/admin/visitors", admin, { duration: "1d", license_plate: "ทท 4040", issue_code: false });
+		const car = await call("POST", "/api/v1/admin/visitors", admin, { duration: "1d", license_plate: "ทท 4040", province: "กทม", brand: "HONDA", color: "RED", issue_code: false });
+		expect((await call("POST", "/api/v1/admin/visitors", admin, { duration: "1d", license_plate: "ABC", issue_code: false })).body.field).toBe("license_plate");
 		expect(car.body.code).toBeUndefined();
 		expect(await gate("ANPR", "ทท4040")).toMatchObject({ decision: "YES", reason_code: "VISITOR_VALID" });
 
 		const all = (await call("GET", "/api/v1/admin/visitors?valid=1", admin)).body.visitors;
 		expect(all.some((v: any) => v.house_id === null && v.purpose === "งานส่วนกลาง")).toBe(true);
+		expect(all.find((v: any) => v.license_plate === "ทท4040")).toMatchObject({ province: "กรุงเทพมหานคร", brand: "HONDA", color: "RED" });
+
+		// edit a visitor (not its house / validity / code); provinces are Thai only
+		const edit = (body: object) => call("PATCH", `/api/v1/admin/visitors/${car.body.visitor_id}`, admin, body);
+		expect((await edit({ full_name: "แขกบ้าน", license_plate: "ทท 5050", province: "เชียงใหม่", color: "BLUE" })).status).toBe(200);
+		expect((await edit({ license_plate: "ทท 5050", province: "Bangkok" })).body.field).toBe("province");
+		expect((await edit({})).status).toBe(400);
+		const edited = (await call("GET", "/api/v1/admin/visitors", admin)).body.visitors.find((v: any) => v.visitor_id === car.body.visitor_id);
+		expect(edited).toMatchObject({ full_name: "แขกบ้าน", license_plate: "ทท5050", province: "เชียงใหม่", color: "BLUE" });
+		expect(await gate("ANPR", "ทท5050")).toMatchObject({ decision: "YES" });
 	});
 
 	it("a vacant house cannot issue guest codes, and its existing codes stop working", async () => {
@@ -228,9 +246,27 @@ describe("house members via LINE", () => {
 
 		const mine = (await call("GET", "/api/v1/owner/house", fam)).body.credentials.find((c: any) => c.credential_id === pin.body.credential_id);
 		expect(mine).toMatchObject({ label: "pin ส่งของ", mine: true });
+		// only the creator edits validity; the owner may still rename anything in the house
+		expect((await call("PATCH", `/api/v1/owner/credentials/${pin.body.credential_id}`, owner, { duration: "7d" })).status).toBe(404);
+		expect((await call("PATCH", `/api/v1/owner/credentials/${pin.body.credential_id}`, owner, { label: "x" })).status).toBe(200);
+		expect((await call("PATCH", `/api/v1/owner/credentials/${pin.body.credential_id}`, fam, { label: "pin แม่บ้าน" })).status).toBe(200);
 		expect((await call("DELETE", `/api/v1/owner/credentials/${pin.body.credential_id}`, owner)).status).toBe(404);
 		expect((await call("DELETE", `/api/v1/owner/credentials/${pin.body.credential_id}`, fam)).status).toBe(200);
 		expect(await gate("PIN", pin.body.value)).toMatchObject({ decision: "NO", reason_code: "CREDENTIAL_REVOKED" });
+		// short names belong to the house: the owner names anything in the house (incl. admin-added cards / vehicles), members only their own
+		const rfid = await call("POST", `/api/v1/admin/houses/${ids.house}/credentials`, admin, { cred_type: "RFID", value: "CARD-9801", duration: "forever" });
+		expect((await call("PATCH", `/api/v1/owner/credentials/${rfid.body.credential_id}`, owner, { label: "บัตรแม่" })).status).toBe(200);
+		expect((await call("PATCH", `/api/v1/owner/credentials/${rfid.body.credential_id}`, owner, { label: "x", duration: "1d" })).status).toBe(404);
+		expect((await call("PATCH", `/api/v1/owner/credentials/${rfid.body.credential_id}`, fam, { label: "x" })).status).toBe(404);
+		const car = await call("POST", `/api/v1/admin/houses/${ids.house}/vehicles`, admin, { license_plate: "บบ 9801" });
+		expect((await call("PATCH", `/api/v1/owner/vehicles/${car.body.vehicle_id}`, owner, { label: "รถพ่อ" })).status).toBe(200);
+		expect((await call("PATCH", `/api/v1/owner/vehicles/${car.body.vehicle_id}`, fam, { label: "x" })).body.error).toBe("OWNER_ONLY");
+		// admin editing the vehicle without a label keeps the owner's name
+		await call("PATCH", `/api/v1/admin/vehicles/${car.body.vehicle_id}`, admin, { license_plate: "บบ 9801", color: "RED" });
+		const house = (await call("GET", "/api/v1/owner/house", fam)).body;
+		expect(house.vehicles.find((v: any) => v.vehicle_id === car.body.vehicle_id).label).toBe("รถพ่อ");
+		expect(house.credentials.find((x: any) => x.credential_id === rfid.body.credential_id).label).toBe("บัตรแม่");
+
 		// admin may delete anything in the project
 		expect((await call("DELETE", `/api/v1/admin/credentials/${qr.body.credential_id}`, admin)).status).toBe(200);
 	});

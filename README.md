@@ -42,7 +42,7 @@ Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievir
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
 สถานะ production (2026-11-25, beta):
-- Migration `0001`–`0007` apply แล้ว, policy seed แล้ว (`0007` apply 2026-11-26 bookmark ก่อน apply `00000008-00000000-0000512e-79bb87346a142d79467dc3f23d3f5ab5`; `0006` apply 2026-11-26 bookmark ก่อน apply `00000006-00000000-0000512e-973be42f89af91dde1fb5e13e5b5897f`; Time Travel bookmark ก่อน apply
+- Migration `0001`–`0008` apply แล้ว, policy seed แล้ว (`0008` apply 2026-11-26 bookmark ก่อน apply `00000009-00000000-0000512e-b5d47e4b54db9c6fdc4d22dddccd23c8`; `0007` apply 2026-11-26 bookmark ก่อน apply `00000008-00000000-0000512e-79bb87346a142d79467dc3f23d3f5ab5`; `0006` apply 2026-11-26 bookmark ก่อน apply `00000006-00000000-0000512e-973be42f89af91dde1fb5e13e5b5897f`; Time Travel bookmark ก่อน apply
   `0004` = สิทธิ์เข้าออกเป็นของบ้าน: `00000002-00000000-0000512e-1d3fb267a62c19c8230ce52ff558934c`,
   `0005` = รหัสโครงการ: `00000003-00000000-0000512e-4eeff727b4aa67764011d2ed1af98f5f`)
 - Device ทดสอบของ SEMA: `SEMA-000-01` (`PRJ-000`, ทางเข้า)
@@ -140,14 +140,19 @@ Header `Authorization: Bearer <JWT>`
 | `DELETE` | `/api/v1/admin/contacts/:id` | ลบผู้ติดต่อ (soft delete) ไม่กระทบสิทธิ์เข้าออกของบ้าน บัญชี LINE ของเขาใช้ไม่ได้ |
 | `POST` | `/api/v1/admin/contacts/:id/link-code` | ออกรหัสผูก LINE 8 ตัว ใช้ครั้งเดียว อายุ 24 ชม. → `{ user_id, link_code }` |
 | `POST` | `/api/v1/admin/houses/:id/vehicles` | `{ license_plate, province?, brand?, color? }` ดู "ทะเบียนรถ" ด้านล่าง |
+| `PATCH` | `/api/v1/admin/vehicles/:id` | แก้รถทั้งคัน `{ license_plate, province?, brand?, color?, label? }` (ตรวจซ้ำแบบเพิ่มใหม่ ไม่นับตัวเอง; ไม่ส่ง `label` = คงชื่อสั้นเดิม) ANPR ใช้ทะเบียนใหม่ทันที |
 | `DELETE` | `/api/v1/admin/vehicles/:id` | ปิดใช้งานรถ |
 | `POST` | `/api/v1/admin/houses/:id/credentials` | `{ cred_type: RFID\|QRCODE\|PIN, value?, label?, duration?, valid_from?, valid_until? }` ดู "บัตร / PIN / QR" ด้านล่าง |
+| `PATCH` | `/api/v1/admin/credentials/:id` | `{ label?, duration? \| valid_until? }` แก้ชื่อสั้น / ระยะเวลา (ตัวรหัสแก้ไม่ได้) |
 | `DELETE` | `/api/v1/admin/credentials/:id` | เพิกถอน (`REVOKED`) |
+| `GET` | `/api/v1/admin/access-logs` | การเข้าออกใหม่สุดก่อน `?limit=` (1–1000, ค่าเริ่มต้น 20) `&from=&to=` (UTC) `&decision=YES\|NO\|ERROR&method=` ไม่มีค่า PIN / QR (มีแค่ `credential_label`) |
 | `GET` | `/api/v1/admin/visitors` | `?house_id=` / `?valid=1` (เฉพาะที่ยังไม่หมดอายุ) |
 | `POST` | `/api/v1/admin/visitors` | `{ duration, house_id?, full_name?, phone_number?, license_plate?, purpose?, issue_code? }` ไม่ส่ง `house_id` = งานส่วนกลาง, บ้าน `VACANT` → `409 HOUSE_VACANT` |
+| `PATCH` | `/api/v1/admin/visitors/:id` | แก้ชื่อ / โทร / วัตถุประสงค์ / รถ (`license_plate`, `province`, `brand`, `color`) / `is_active` (false = เพิกถอน, true = ใช้ได้อีกครั้งพร้อม Guest Code เดิม) ไม่เปลี่ยนบ้าน อายุ และโค้ด |
 | `DELETE` | `/api/v1/admin/visitors/:id` | เพิกถอน visitor + Guest Code |
 | `GET` | `/api/v1/admin/projects` | **ROOT** ทุกโครงการ + จำนวนบ้าน / admin |
-| `POST` | `/api/v1/admin/projects` | **ROOT** `{ project_code, project_name }` สร้างโครงการ + policy ตั้งต้น; ซ้ำ → `409` |
+| `POST` | `/api/v1/admin/projects` | **ROOT** `{ project_code, project_name, common_area_code? }` สร้างโครงการ + policy ตั้งต้น; ซ้ำ → `409` |
+| `PATCH` | `/api/v1/admin/projects/:code` | **ROOT** ตั้งค่าโครงการ `{ project_name?, common_area_code? }` (รหัสพื้นที่ส่วนกลาง 1–6 หลัก ขึ้นต้นด้วย 0 ค่าเริ่มต้น `0000`) |
 | `GET` | `/api/v1/admin/admins` | **ROOT** ผู้ดูแลทุกโครงการ (`ref`, `admin_level`) |
 | `POST` | `/api/v1/admin/admins` | **ROOT** `{ project_code, admin_name, password }` สร้าง `ADMIN` (รหัสผ่าน ≥ 12 ตัว) → `{ admin_id, ref }` เช่น `SNTW-BK01-A01`; ชื่อซ้ำในโครงการ → `409 ADMIN_EXISTS` |
 | `DELETE` | `/api/v1/admin/admins/:id` | **ROOT** ปิดใช้งาน `ADMIN` |
@@ -157,6 +162,7 @@ Header `Authorization: Bearer <JWT>`
 - สิทธิ์เข้าออก (รถ / บัตร / PIN / QR) เป็นของ **บ้าน** ไม่ใช่ของคน; `tb_user` = ผู้ติดต่อของบ้าน + บัญชี LINE
 - `payment_status`: `NORMAL` / `OVERDUE` / `OVERDUE_SEVERE`
 - `occupancy_status`: `OCCUPIED` (ค่าเริ่มต้น) / `VACANT` = ไม่มีผู้อยู่อาศัย: เพิ่มรถ / บัตร / Visitor ไม่ได้ (`409 HOUSE_VACANT`) และของเดิมใช้ไม่ได้จนกลับเป็น `OCCUPIED`
+- จังหวัด (รถของบ้าน / ผู้มาติดต่อ) ต้องเป็นภาษาไทย (ป้ายทะเบียนไทย) ไม่ใช่ → `400 province`
 - ทะเบียนรถ: หมวด + เลข 1–4 หลัก (`กข 1234`, `1กข 1234`, `รวย 9999`, `จ 12`) หรือรถบรรทุก / รถโดยสาร `70-1234` (เลข 2 + 4 หลัก)
   ไม่ตรง → `400` (`field: license_plate`); เก็บแบบตัดช่องว่าง / ขีด; จังหวัดเก็บเป็นชื่อเต็ม
   ทะเบียนเดียวกันต่างจังหวัด = คนละคัน; ซ้ำในจังหวัดเดียวกัน (หรือฝั่งใดไม่ระบุจังหวัด) → `409 PLATE_EXISTS`
@@ -197,6 +203,8 @@ Header `Authorization: Bearer <JWT>`
 | `POST` | `/api/v1/owner/members/:id/link-code` | **OWNER** ออกรหัสเชิญใหม่ |
 | `DELETE` | `/api/v1/owner/members/:id` | **OWNER** ลบสมาชิก (ลบเจ้าบ้านไม่ได้) |
 | `POST` | `/api/v1/owner/credentials` | `{ cred_type: PIN\|QRCODE, value?, label?, duration? }` กติกาเดียวกับ Admin (RFID ไม่ได้) |
+| `PATCH` | `/api/v1/owner/credentials/:id` | `{ label?, duration? }` แก้ได้เฉพาะที่ตัวเองสร้าง; **OWNER** ตั้งชื่อสั้น (`label` อย่างเดียว) ได้ทุกรายการในบ้าน รวมบัตร RFID ที่ Admin เพิ่ม |
+| `PATCH` | `/api/v1/owner/vehicles/:id` | **OWNER** `{ label }` ตั้งชื่อสั้นรถ (ทะเบียน ฯลฯ เป็นของ Admin) |
 | `DELETE` | `/api/v1/owner/credentials/:id` | ลบได้เฉพาะที่ตัวเองสร้าง |
 | `GET` | `/api/v1/owner/visitors` | visitor ของบ้านตัวเองเท่านั้น (`?valid=1`) |
 | `POST` | `/api/v1/owner/visitors` | `{ duration, full_name?, phone_number?, license_plate?, purpose? }` → `{ visitor_id, code, valid_until }`; บ้าน `VACANT` → `409 HOUSE_VACANT` |
@@ -204,7 +212,7 @@ Header `Authorization: Bearer <JWT>`
 
 ### Guest Code
 
-- รูปแบบ `<house_code>+<สุ่ม 4 หลัก>` เช่น `9801+1234` งานส่วนกลาง (admin ออก ไม่มีบ้าน) ขึ้นต้น `0+` เช่น `0+5521`
+- รูปแบบ `<house_code>+<สุ่ม 4 หลัก>` เช่น `9801+1234` งานส่วนกลาง (admin ออก ไม่มีบ้าน) ขึ้นต้นด้วยรหัสพื้นที่ส่วนกลางของโครงการ (`tb_project.common_area_code`, ค่าเริ่มต้น `0000`) เช่น `0000+5521`
 - เลขเดียวกันใช้ได้ 2 แบบ: ทำเป็น QR (เนื้อหา QR = `9801+1234`) หรือกดที่ Keypad (`98011234`, `9801#1234`, `9801*1234`)
 - `duration`: `1d` / `7d` / `14d` / `30d` / `1y` / `forever` (100 ปี)
 - DB เก็บแค่ hash: โค้ดจริงคืนให้ **ครั้งเดียว** ตอนสร้าง LIFF ต้องแสดง / แชร์ทันที (เช่น `liff.shareTargetPicker`)
