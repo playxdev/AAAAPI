@@ -362,19 +362,33 @@ interface AdminRow {
 	admin_password: string;
 }
 
-const getActiveAdmin = (env: Env, col: "admin_id" | "admin_name", value: string) =>
+const getActiveAdmin = (env: Env, adminId: string) =>
 	env.DB.prepare(
-		`SELECT admin_id, project_id, admin_password FROM tb_admin WHERE ${col} = ? AND is_active = 1 AND id_status = 'ACTIVE'`,
+		"SELECT admin_id, project_id, admin_password FROM tb_admin WHERE admin_id = ? AND is_active = 1 AND id_status = 'ACTIVE'",
 	)
-		.bind(value)
+		.bind(adminId)
 		.first<AdminRow>();
 
-// POST /api/v1/admin/login  { admin_name, password } -> JWT อายุ 1 ชั่วโมง
+// รหัสโครงการ AAAA-AA11: ไม่สนตัวเล็กใหญ่ / ขีด / ช่องว่าง -> "PROJ-0001"; รูปแบบผิด = null
+export function normalizeProjectCode(v: unknown): string | null {
+	if (typeof v !== "string") return null;
+	const c = v.toUpperCase().replace(/[\s-]/g, "");
+	return /^[A-Z]{4}[A-Z0-9]{4}$/.test(c) ? `${c.slice(0, 4)}-${c.slice(4)}` : null;
+}
+
+// POST /api/v1/admin/login  { project_code, admin_name, password } -> JWT อายุ 1 ชั่วโมง
+// ชื่อ admin ห้ามซ้ำเฉพาะในโครงการ; รหัสโครงการ / ชื่อ / รหัสผ่านผิด ตอบ INVALID_LOGIN เหมือนกัน (ไม่บอกว่าโครงการมีอยู่จริงไหม)
 async function login(req: Request, env: Env): Promise<Response> {
 	const body = await readJson(req);
-	if (!isStr(body?.admin_name, 128) || !isStr(body?.password, 256)) return json({ error: "BAD_REQUEST" }, 400);
+	const projectCode = normalizeProjectCode(body?.project_code);
+	if (!projectCode || !isStr(body?.admin_name, 128) || !isStr(body?.password, 256)) return json({ error: "BAD_REQUEST" }, 400);
 
-	const admin = await getActiveAdmin(env, "admin_name", body.admin_name);
+	const admin = await env.DB.prepare(
+		`SELECT a.admin_id, a.project_id, a.admin_password FROM tb_admin a JOIN tb_project p ON p.project_id = a.project_id
+		 WHERE p.project_code = ? AND p.is_active = 1 AND a.admin_name = ? AND a.is_active = 1 AND a.id_status = 'ACTIVE'`,
+	)
+		.bind(projectCode, body.admin_name)
+		.first<AdminRow>();
 	const ok = await verifyPassword(body.password, admin?.admin_password ?? DUMMY_HASH);
 	if (!admin || !ok) return json({ error: "INVALID_LOGIN" }, 401);
 
@@ -389,7 +403,7 @@ async function login(req: Request, env: Env): Promise<Response> {
 		exp: now + ADMIN_TTL_SEC,
 	});
 	await writeAudit(env, admin.project_id, "ADMIN", admin.admin_id, "LOGIN", admin.admin_id, {});
-	return json({ access_token: token, token_type: "Bearer", expires_in: ADMIN_TTL_SEC });
+	return json({ access_token: token, token_type: "Bearer", expires_in: ADMIN_TTL_SEC, project_code: projectCode });
 }
 
 export async function handleAdmin(req: Request, env: Env): Promise<Response> {
@@ -403,7 +417,7 @@ export async function handleAdmin(req: Request, env: Env): Promise<Response> {
 	const auth = req.headers.get("Authorization") ?? "";
 	const claims = auth.startsWith("Bearer ") ? await verifyJwt(env.JWT_SECRET, auth.slice(7), JWT_ISS, ADMIN_AUD) : null;
 	// เช็ค DB ทุกครั้ง เพื่อให้การปิดบัญชี admin มีผลทันที
-	const admin = claims && (await getActiveAdmin(env, "admin_id", claims.sub));
+	const admin = claims && (await getActiveAdmin(env, claims.sub));
 	if (!claims || !admin || admin.project_id !== claims.pid) return json({ error: "UNAUTHORIZED" }, 401);
 
 	const needsBody = req.method === "POST" || req.method === "PATCH";

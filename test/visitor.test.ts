@@ -48,7 +48,7 @@ beforeAll(async () => {
 		["VISITOR", "QRCODE"], ["VISITOR", "PIN"], ["VISITOR", "ANPR"],
 	];
 	await env.DB.batch([
-		env.DB.prepare("INSERT INTO tb_project (project_id, project_name) VALUES (?, 'V')").bind(P),
+		env.DB.prepare("INSERT INTO tb_project (project_id, project_name, project_code) VALUES (?, 'V', 'VILL-0001')").bind(P),
 		env.DB.prepare("INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password) VALUES ('ADM_V', ?, 'admin-v', ?)").bind(
 			P,
 			await hashPassword(PASSWORD),
@@ -59,7 +59,7 @@ beforeAll(async () => {
 		),
 		...policy.map(([s, m]) => env.DB.prepare("INSERT INTO tb_policy (project_id, subject_type, method) VALUES (?, ?, ?)").bind(P, s, m)),
 	]);
-	admin = (await call("POST", "/api/v1/admin/login", undefined, { admin_name: "admin-v", password: PASSWORD })).body.access_token;
+	admin = (await call("POST", "/api/v1/admin/login", undefined, { project_code: "VILL-0001", admin_name: "admin-v", password: PASSWORD })).body.access_token;
 
 	ids.house = (await call("POST", "/api/v1/admin/houses", admin, { house_number: "98/1", house_code: "9801" })).body.house_id;
 	ids.house2 = (await call("POST", "/api/v1/admin/houses", admin, { house_number: "98/2", house_code: "9802" })).body.house_id;

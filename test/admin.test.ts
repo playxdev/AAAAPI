@@ -14,8 +14,9 @@ const call = async (method: string, path: string, token?: string, body?: unknown
 	return { status: res.status, body: (await res.json()) as Record<string, any> };
 };
 
-async function login(name: string, password = PASSWORD) {
-	return call("POST", "/api/v1/admin/login", undefined, { admin_name: name, password });
+// admin-a อยู่โครงการ PRJA-0001, admin-b อยู่ PRJB-0001
+async function login(name: string, password = PASSWORD, project_code = name === "admin-b" ? "PRJB-0001" : "PRJA-0001") {
+	return call("POST", "/api/v1/admin/login", undefined, { project_code, admin_name: name, password });
 }
 
 async function authorize(method: string, value: string, province?: string) {
@@ -30,7 +31,7 @@ beforeAll(async () => {
 		["RESIDENT_OVERDUE", "RFID"], ["RESIDENT_OVERDUE", "PIN"],
 	];
 	await env.DB.batch([
-		env.DB.prepare("INSERT INTO tb_project (project_id, project_name) VALUES ('PA', 'A'), ('PB', 'B')"),
+		env.DB.prepare("INSERT INTO tb_project (project_id, project_name, project_code) VALUES ('PA', 'A', 'PRJA-0001'), ('PB', 'B', 'PRJB-0001')"),
 		env.DB.prepare(
 			"INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password) VALUES ('ADM_A', 'PA', 'admin-a', ?), ('ADM_B', 'PB', 'admin-b', ?)",
 		).bind(hash, hash),
@@ -45,6 +46,25 @@ describe("admin auth", () => {
 	it("rejects wrong password and unknown admin", async () => {
 		expect((await login("admin-a", "wrong-password")).status).toBe(401);
 		expect((await login("nobody")).status).toBe(401);
+	});
+
+	it("logs in with project code + admin name; names only need to be unique per project", async () => {
+		// case / dash / spaces in the code do not matter; the canonical code comes back
+		const ok = await login("admin-a", PASSWORD, " prja0001 ");
+		expect(ok.status).toBe(200);
+		expect(ok.body.project_code).toBe("PRJA-0001");
+		// right name + password, wrong project -> same answer as a wrong password
+		expect((await login("admin-a", PASSWORD, "PRJB-0001")).body).toEqual({ error: "INVALID_LOGIN" });
+		expect((await login("admin-a", PASSWORD, "NOPE-0000")).status).toBe(401);
+		for (const bad of ["PRJ-0001", "PRJA-00011", "1234-ABCD", ""]) expect((await login("admin-a", PASSWORD, bad)).status, bad).toBe(400);
+
+		// "admin-a" may exist in project B too
+		await env.DB.prepare("INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password) VALUES ('ADM_B2', 'PB', 'admin-a', ?)")
+			.bind(await hashPassword(PASSWORD))
+			.run();
+		const b = await login("admin-a", PASSWORD, "PRJB-0001");
+		expect(b.status).toBe(200);
+		expect((await call("GET", "/api/v1/admin/houses", b.body.access_token)).body.houses).toHaveLength(0);
 	});
 
 	it("rejects missing token and device tokens", async () => {

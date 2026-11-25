@@ -42,24 +42,30 @@ Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievir
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
 สถานะ production (2026-11-25, beta):
-- Migration `0001`–`0004` apply แล้ว, policy seed แล้ว (`0004` = สิทธิ์เข้าออกเป็นของบ้าน, apply 2026-11-25
-  Time Travel bookmark ก่อน apply: `00000002-00000000-0000512e-1d3fb267a62c19c8230ce52ff558934c`)
+- Migration `0001`–`0005` apply แล้ว, policy seed แล้ว (apply 2026-11-25; Time Travel bookmark ก่อน apply
+  `0004` = สิทธิ์เข้าออกเป็นของบ้าน: `00000002-00000000-0000512e-1d3fb267a62c19c8230ce52ff558934c`,
+  `0005` = รหัสโครงการ: `00000003-00000000-0000512e-4eeff727b4aa67764011d2ed1af98f5f`)
 - Device ทดสอบของ SEMA: `SEMA-000-01` (`PRJ-000`, ทางเข้า)
-- โครงการ `PRJ-000` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
+- โครงการ `PRJ-000` รหัสโครงการ `PROJ-0001` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
 - ล้างข้อมูลทดสอบแล้ว 2026-11-12 (เหลือโครงการ, admin, policy) ข้อมูลยังเป็น beta ล้างได้
 - `ALLOWED_ORIGINS` = `https://aaa-admin.pages.dev` (Admin WebApp, ตรงกันทั้งตัว URL preview ของ Pages ใช้ไม่ได้)
 - ยังว่าง: `LINE_CHANNEL_ID` (LIFF ยังเรียก API ไม่ได้)
 - ยังไม่มี rate limit ที่ `/admin/login`, `/owner/*`, `/auth/device/token` (`workers.dev` ตั้ง WAF ไม่ได้
   ต้องใช้ Workers Rate Limiting binding หรือย้ายไปโดเมนของตัวเอง)
 
-### สร้าง Admin คนแรก
+### สร้างโครงการ + Admin คนแรก
 
-Admin แต่ละคนผูกกับ 1 โครงการ (`tb_admin.project_id`) และเห็นเฉพาะข้อมูลของโครงการนั้น
+ทุกโครงการ (หมู่บ้าน / คอนโด / อาคาร / สถานที่) ใช้ DB ร่วมกัน แยกด้วย `project_id`
+Admin login ด้วย **รหัสโครงการ** `AAAA-AA11` (ชื่อย่อ A–Z 4 ตัว + สาขา / ลำดับ A–Z 0–9 4 ตัว เช่น `PROJ-0001`, `SNTW-BK01`)
+เก็บใน `tb_project.project_code` แบบตัวใหญ่ + ขีด ห้ามซ้ำ; `admin_name` ห้ามซ้ำเฉพาะในโครงการเดียวกัน
 
 ```sh
+npx wrangler d1 execute aaa-d1 --remote --command \
+  "INSERT INTO tb_project (project_id, project_name, project_code) VALUES ('<project_id>', '<ชื่อโครงการ>', 'SNTW-BK01')"
+npx wrangler d1 execute aaa-d1 --remote --file=../AAASQL/seeds/default_policy.sql
 node scripts/hash-password.mjs        # พิมพ์รหัสผ่าน (อย่างน้อย 12 ตัวอักษร) ได้ hash pbkdf2_sha256$...
 npx wrangler d1 execute aaa-d1 --remote --command \
-  "INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password) VALUES ('ADM-001', '<project_id>', '<admin_name>', '<hash>')"
+  "INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password) VALUES ('<admin_id>', '<project_id>', '<admin_name>', '<hash>')"
 ```
 
 ## Dev / Test
@@ -114,7 +120,7 @@ Header `Authorization: Bearer <JWT>`
 
 | Method | Endpoint | Body / หมายเหตุ |
 |---|---|---|
-| `POST` | `/api/v1/admin/login` | `{ admin_name, password }` → `{ access_token, expires_in: 3600 }` |
+| `POST` | `/api/v1/admin/login` | `{ project_code, admin_name, password }` → `{ access_token, expires_in: 3600, project_code }`; รหัสโครงการไม่สนตัวเล็กใหญ่ / ขีด, รูปแบบผิด → `400`, โครงการ / ชื่อ / รหัสผ่านผิด หรือโครงการปิดใช้งาน → `401 INVALID_LOGIN` (ไม่บอกว่าผิดช่องไหน) |
 | `GET` | `/api/v1/admin/houses` | รายการบ้าน + `contacts[]` (เจ้าบ้านขึ้นก่อน = ผู้ติดต่อหลัก) |
 | `POST` | `/api/v1/admin/houses` | `{ house_number, house_code?, zone_or_soi?, occupancy_status? }` |
 | `GET` | `/api/v1/admin/houses/:id` | บ้าน + `contacts` + `vehicles` + `credentials` (ไม่มี hash / ค่าจริง) |
