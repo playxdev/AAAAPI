@@ -28,7 +28,7 @@ npx wrangler login
 npx wrangler secret put JWT_SECRET    # key เซ็น device JWT
 npx wrangler secret put CRED_PEPPER   # key HMAC ของ RFID / QR / PIN (ห้ามเปลี่ยนหลังลงทะเบียน credential แล้ว)
 # แก้ vars ใน wrangler.jsonc: ALLOWED_ORIGINS (origin ของ Pages + LIFF), LINE_CHANNEL_ID (LINE Login channel ของ LIFF)
-CLOUDFLARE_ACCOUNT_ID=30ec5dca725dd7acef6a6ef89342e403 npx wrangler d1 migrations apply db1-aaa --remote
+CLOUDFLARE_ACCOUNT_ID=30ec5dca725dd7acef6a6ef89342e403 npx wrangler d1 migrations apply aaa-d1 --remote
 npm run deploy
 ```
 
@@ -38,7 +38,7 @@ wrangler 4.156.0: คำสั่ง `d1 migrations ...` ไม่อ่าน `
 Schema / migrations / seed อยู่ใน repo [AAASQL](https://github.com/playxdev/AAASQL) (`migrations_dir` = `../AAASQL/migrations`)
 ต้อง clone AAAAPI กับ AAASQL ไว้ใน folder เดียวกัน ทั้ง `wrangler` และ `npm test` อ่าน migration จากที่นั่น
 
-Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievirus, D1 `db1-aaa` region APAC)
+Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievirus, D1 `aaa-d1` region APAC)
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
 สถานะ production (2026-11-12, beta):
@@ -57,7 +57,7 @@ Admin แต่ละคนผูกกับ 1 โครงการ (`tb_admin
 
 ```sh
 node scripts/hash-password.mjs        # พิมพ์รหัสผ่าน (อย่างน้อย 12 ตัวอักษร) ได้ hash pbkdf2_sha256$...
-npx wrangler d1 execute db1-aaa --remote --command \
+npx wrangler d1 execute aaa-d1 --remote --command \
   "INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password) VALUES ('ADM-001', '<project_id>', '<admin_name>', '<hash>')"
 ```
 
@@ -174,7 +174,7 @@ API ของอุปกรณ์ (`/auth/device/token`, `/access/authorize`) �
 ## กติกาข้อมูล
 
 - `tb_policy`: ไม่มีแถว = ไม่อนุญาต หลังเพิ่มโครงการใหม่ต้องรัน `../AAASQL/seeds/default_policy.sql`
-  (`npx wrangler d1 execute db1-aaa --remote --file=../AAASQL/seeds/default_policy.sql`) รันซ้ำได้
+  (`npx wrangler d1 execute aaa-d1 --remote --file=../AAASQL/seeds/default_policy.sql`) รันซ้ำได้
   - ลูกบ้านปกติ: ANPR / RFID / QRCODE / PIN
   - ลูกบ้านค้างชำระ (`tb_house.payment_status = 'OVERDUE'`): RFID / PIN เท่านั้น ไม่ได้ห้ามเข้า แต่ไม่ได้ใช้ ANPR
   - ลูกบ้านค้างชำระต่อเนื่อง (`'OVERDUE_SEVERE'`): PIN เท่านั้น (ต้องกด Keypad)

@@ -15,8 +15,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "db1-aaa",
-      "database_id": "e69cbde0-e4b3-4986-804c-ffab15a153a7",
+      "database_name": "aaa-d1",
+      "database_id": "256177bc-1cb6-449f-b5c6-f5cac2f2b046",
       "migrations_dir": "../AAASQL/migrations"
     }
   ]
