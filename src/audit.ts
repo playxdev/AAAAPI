@@ -1,5 +1,5 @@
 // field ที่ห้ามลง audit log
-const SECRET_FIELDS = new Set(["value", "password", "id_token", "link_code"]);
+const SECRET_FIELDS = new Set(["value", "password", "current_password", "new_password", "id_token", "link_code"]);
 
 export type ActorType = "ADMIN" | "OWNER";
 

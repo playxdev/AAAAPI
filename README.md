@@ -42,7 +42,7 @@ Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievir
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
 สถานะ production (2026-11-25, beta):
-- Migration `0001`–`0006` apply แล้ว, policy seed แล้ว (`0006` apply 2026-11-26 bookmark ก่อน apply `00000006-00000000-0000512e-973be42f89af91dde1fb5e13e5b5897f`; Time Travel bookmark ก่อน apply
+- Migration `0001`–`0007` apply แล้ว, policy seed แล้ว (`0007` apply 2026-11-26 bookmark ก่อน apply `00000008-00000000-0000512e-79bb87346a142d79467dc3f23d3f5ab5`; `0006` apply 2026-11-26 bookmark ก่อน apply `00000006-00000000-0000512e-973be42f89af91dde1fb5e13e5b5897f`; Time Travel bookmark ก่อน apply
   `0004` = สิทธิ์เข้าออกเป็นของบ้าน: `00000002-00000000-0000512e-1d3fb267a62c19c8230ce52ff558934c`,
   `0005` = รหัสโครงการ: `00000003-00000000-0000512e-4eeff727b4aa67764011d2ed1af98f5f`)
 - Device ทดสอบของ SEMA: `SEMA-000-01` (`PRJ-000`, ทางเข้า)
@@ -126,10 +126,11 @@ Header `Authorization: Bearer <JWT>`
 - `ROOT` = PlayDevX (โครงการ `PLAY-0013`) จัดการได้ทุกโครงการ: ส่ง Header `X-Project-Code: PROJ-0001` เพื่อทำงานในโครงการนั้น
   (ไม่ส่ง = โครงการของตัวเอง, ไม่พบ → `404 PROJECT_NOT_FOUND`); สร้างโครงการ / Admin ได้; Root เพิ่มด้วย SQL เท่านั้น
 - `ADMIN` = ประจำโครงการ (Header `X-Project-Code` ถูกเมิน); `/projects`, `/admins` → `403 FORBIDDEN`
+- รหัสที่ Root สร้าง / รีเซ็ตให้ (`must_change_password = 1`): เรียกได้แค่ `POST /me/password` อื่น ๆ → `403 PASSWORD_CHANGE_REQUIRED`
 
 | Method | Endpoint | Body / หมายเหตุ |
 |---|---|---|
-| `POST` | `/api/v1/admin/login` | `{ project_code, admin_name, password }` → `{ access_token, expires_in: 3600, project_code, project_name, admin_level }`; รหัสโครงการไม่สนตัวเล็กใหญ่ / ขีด, รูปแบบผิด → `400`, โครงการ / ชื่อ / รหัสผ่านผิด หรือโครงการปิดใช้งาน → `401 INVALID_LOGIN` (ไม่บอกว่าผิดช่องไหน) |
+| `POST` | `/api/v1/admin/login` | `{ project_code, admin_name, password }` → `{ access_token, expires_in: 3600, project_code, project_name, admin_level, must_change_password }`; รหัสโครงการไม่สนตัวเล็กใหญ่ / ขีด, รูปแบบผิด → `400`, โครงการ / ชื่อ / รหัสผ่านผิด หรือโครงการปิดใช้งาน → `401 INVALID_LOGIN` (ไม่บอกว่าผิดช่องไหน) |
 | `GET` | `/api/v1/admin/houses` | รายการบ้าน + `contacts[]` (เจ้าบ้านขึ้นก่อน = ผู้ติดต่อหลัก) |
 | `POST` | `/api/v1/admin/houses` | `{ house_number, house_code?, zone_or_soi?, occupancy_status? }` |
 | `GET` | `/api/v1/admin/houses/:id` | บ้าน + `contacts` + `vehicles` + `credentials` (ไม่มี hash / ค่าจริง) |
@@ -150,6 +151,8 @@ Header `Authorization: Bearer <JWT>`
 | `GET` | `/api/v1/admin/admins` | **ROOT** ผู้ดูแลทุกโครงการ (`ref`, `admin_level`) |
 | `POST` | `/api/v1/admin/admins` | **ROOT** `{ project_code, admin_name, password }` สร้าง `ADMIN` (รหัสผ่าน ≥ 12 ตัว) → `{ admin_id, ref }` เช่น `SNTW-BK01-A01`; ชื่อซ้ำในโครงการ → `409 ADMIN_EXISTS` |
 | `DELETE` | `/api/v1/admin/admins/:id` | **ROOT** ปิดใช้งาน `ADMIN` |
+| `POST` | `/api/v1/admin/admins/:id/reset-password` | **ROOT** ลืมรหัสผ่าน: ตั้งรหัสสุ่ม 16 ตัวให้ `ADMIN` → `{ password }` (คืนครั้งเดียว) และบังคับเปลี่ยน |
+| `POST` | `/api/v1/admin/me/password` | `{ current_password, new_password }` เปลี่ยนรหัสของตัวเอง (≥ 12 ตัว ไม่ซ้ำรหัสเดิม); รหัสเดิมผิด → `400 WRONG_PASSWORD` |
 
 - สิทธิ์เข้าออก (รถ / บัตร / PIN / QR) เป็นของ **บ้าน** ไม่ใช่ของคน; `tb_user` = ผู้ติดต่อของบ้าน + บัญชี LINE
 - `payment_status`: `NORMAL` / `OVERDUE` / `OVERDUE_SEVERE`

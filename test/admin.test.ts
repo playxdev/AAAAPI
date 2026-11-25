@@ -244,7 +244,27 @@ describe("root", () => {
 		expect(ad.body.ref).toBe("SNTW-BK01-A01");
 		expect((await call("POST", "/api/v1/admin/admins", root, { project_code: "SNTW-BK01", admin_name: "admin", password: PASSWORD })).status).toBe(409);
 		expect((await call("POST", "/api/v1/admin/admins", root, { project_code: "SNTW-BK01", admin_name: "y", password: "short" })).status).toBe(400);
-		expect((await login("admin", PASSWORD, "SNTW-BK01")).status).toBe(200);
+		// an admin created by root must set their own password first
+		const first = (await login("admin", PASSWORD, "SNTW-BK01")).body;
+		expect(first.must_change_password).toBe(true);
+		expect((await call("GET", "/api/v1/admin/houses", first.access_token)).body.error).toBe("PASSWORD_CHANGE_REQUIRED");
+		const change = (body: object) => call("POST", "/api/v1/admin/me/password", first.access_token, body);
+		expect((await change({ current_password: "wrong-password!", new_password: "brand-new-password" })).body.error).toBe("WRONG_PASSWORD");
+		expect((await change({ current_password: PASSWORD, new_password: "short" })).body.field).toBe("new_password");
+		expect((await change({ current_password: PASSWORD, new_password: PASSWORD })).body.field).toBe("new_password");
+		expect((await change({ current_password: PASSWORD, new_password: "brand-new-password" })).status).toBe(200);
+		expect((await call("GET", "/api/v1/admin/houses", first.access_token)).status).toBe(200);
+		expect((await login("admin", "brand-new-password", "SNTW-BK01")).body.must_change_password).toBe(false);
+
+		// forgot password: root issues a one-time random password, the admin must change it again
+		const reset = await call("POST", `/api/v1/admin/admins/${ad.body.admin_id}/reset-password`, root);
+		expect(reset.body.password).toMatch(/^[A-HJ-NP-Za-km-z2-9]{16}$/);
+		expect((await login("admin", "brand-new-password", "SNTW-BK01")).status).toBe(401);
+		expect((await login("admin", reset.body.password, "SNTW-BK01")).body.must_change_password).toBe(true);
+		expect((await call("POST", `/api/v1/admin/admins/${ad.body.admin_id}/reset-password`, a.access_token)).status).toBe(403);
+		expect((await call("POST", "/api/v1/admin/admins/ROOT1/reset-password", root)).status).toBe(404);
+		const audit = await env.DB.prepare("SELECT detail FROM tb_audit_log WHERE action LIKE '%me/password'").all<{ detail: string }>();
+		expect(JSON.stringify(audit.results)).not.toContain("brand-new-password");
 
 		// root works inside any project with X-Project-Code; an admin's header is ignored
 		await call("POST", "/api/v1/admin/houses", root, { house_number: "1/1" }, { "X-Project-Code": "SNTW-BK01" });

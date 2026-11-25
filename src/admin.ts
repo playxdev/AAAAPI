@@ -334,7 +334,10 @@ async function createAdmin(c: Ctx) {
 	const adminId = crypto.randomUUID();
 	const ref = `${code}-A${String(count + 1).padStart(2, "0")}`;
 	try {
-		await c.env.DB.prepare("INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password, admin_level, ref) VALUES (?, ?, ?, ?, 'ADMIN', ?)")
+		// รหัสที่ Root ตั้งให้ = ต้องเปลี่ยนตอน login ครั้งแรก
+		await c.env.DB.prepare(
+			"INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password, admin_level, ref, must_change_password) VALUES (?, ?, ?, ?, 'ADMIN', ?, 1)",
+		)
 			.bind(adminId, project.project_id, adminName, hash, ref)
 			.run();
 	} catch (err) {
@@ -342,6 +345,36 @@ async function createAdmin(c: Ctx) {
 		throw err;
 	}
 	return json({ admin_id: adminId, ref }, 201);
+}
+
+// 16 ตัว ไม่มีตัวที่สับสนกัน (I l O 0 1)
+const PW_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+const randomPassword = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => PW_ALPHABET[b % PW_ALPHABET.length]).join("");
+
+// ลืมรหัสผ่าน: Root ตั้งรหัสสุ่มให้ ADMIN (คืนครั้งเดียว) แล้ว ADMIN ต้องเปลี่ยนตอน login
+async function resetAdminPassword(c: Ctx) {
+	requireRoot(c);
+	const password = randomPassword();
+	const res = await c.env.DB.prepare(
+		"UPDATE tb_admin SET admin_password = ?, must_change_password = 1 WHERE admin_id = ? AND admin_level = 'ADMIN' AND is_active = 1",
+	)
+		.bind(await hashPassword(password), c.id)
+		.run();
+	if (res.meta.changes === 0) throw notFound();
+	return json({ admin_id: c.id, password });
+}
+
+// เปลี่ยนรหัสผ่านของตัวเอง (ทั้ง ROOT / ADMIN) ต้องรู้รหัสเดิม; รหัสใหม่ ≥ 12 ตัว และไม่ซ้ำรหัสเดิม
+async function changeMyPassword(c: Ctx) {
+	const current = reqStr(c.body, "current_password", 256);
+	const next = reqStr(c.body, "new_password", 256);
+	if (next.length < 12 || next === current) throw badField("new_password");
+	const me = await getActiveAdmin(c.env, c.adminId);
+	if (!me || !(await verifyPassword(current, me.admin_password))) throw new HttpError(400, "WRONG_PASSWORD", "current_password");
+	await c.env.DB.prepare("UPDATE tb_admin SET admin_password = ?, must_change_password = 0 WHERE admin_id = ?")
+		.bind(await hashPassword(next), c.adminId)
+		.run();
+	return json({ admin_id: c.adminId, must_change_password: 0 });
 }
 
 async function deactivateAdmin(c: Ctx) {
@@ -377,6 +410,8 @@ const ROUTES = [
 	route("GET", "/admins", listAdmins),
 	route("POST", "/admins", createAdmin),
 	route("DELETE", "/admins/:id", deactivateAdmin),
+	route("POST", "/admins/:id/reset-password", resetAdminPassword),
+	route("POST", "/me/password", changeMyPassword),
 	route("GET", "/visitors", adminListVisitors),
 	route("POST", "/visitors", adminCreateVisitor),
 	route("DELETE", "/visitors/:id", adminRevokeVisitor),
@@ -387,11 +422,12 @@ interface AdminRow {
 	project_id: string;
 	admin_password: string;
 	admin_level: string;
+	must_change_password: number | null;
 }
 
 const getActiveAdmin = (env: Env, adminId: string) =>
 	env.DB.prepare(
-		"SELECT admin_id, project_id, admin_password, admin_level FROM tb_admin WHERE admin_id = ? AND is_active = 1 AND id_status = 'ACTIVE'",
+		"SELECT admin_id, project_id, admin_password, admin_level, must_change_password FROM tb_admin WHERE admin_id = ? AND is_active = 1 AND id_status = 'ACTIVE'",
 	)
 		.bind(adminId)
 		.first<AdminRow>();
@@ -411,7 +447,7 @@ async function login(req: Request, env: Env): Promise<Response> {
 	if (!projectCode || !isStr(body?.admin_name, 128) || !isStr(body?.password, 256)) return json({ error: "BAD_REQUEST" }, 400);
 
 	const admin = await env.DB.prepare(
-		`SELECT a.admin_id, a.project_id, a.admin_password, a.admin_level, p.project_name FROM tb_admin a JOIN tb_project p ON p.project_id = a.project_id
+		`SELECT a.admin_id, a.project_id, a.admin_password, a.admin_level, a.must_change_password, p.project_name FROM tb_admin a JOIN tb_project p ON p.project_id = a.project_id
 		 WHERE p.project_code = ? AND p.is_active = 1 AND a.admin_name = ? AND a.is_active = 1 AND a.id_status = 'ACTIVE'`,
 	)
 		.bind(projectCode, body.admin_name)
@@ -430,7 +466,15 @@ async function login(req: Request, env: Env): Promise<Response> {
 		exp: now + ADMIN_TTL_SEC,
 	});
 	await writeAudit(env, admin.project_id, "ADMIN", admin.admin_id, "LOGIN", admin.admin_id, {});
-	return json({ access_token: token, token_type: "Bearer", expires_in: ADMIN_TTL_SEC, project_code: projectCode, project_name: admin.project_name, admin_level: admin.admin_level });
+	return json({
+		access_token: token,
+		token_type: "Bearer",
+		expires_in: ADMIN_TTL_SEC,
+		project_code: projectCode,
+		project_name: admin.project_name,
+		admin_level: admin.admin_level,
+		must_change_password: admin.must_change_password === 1,
+	});
 }
 
 export async function handleAdmin(req: Request, env: Env): Promise<Response> {
@@ -446,6 +490,10 @@ export async function handleAdmin(req: Request, env: Env): Promise<Response> {
 	// เช็ค DB ทุกครั้ง เพื่อให้การปิดบัญชี admin มีผลทันที
 	const admin = claims && (await getActiveAdmin(env, claims.sub));
 	if (!claims || !admin || admin.project_id !== claims.pid) return json({ error: "UNAUTHORIZED" }, 401);
+	// รหัสที่ Root ตั้งให้: ใช้ได้แค่เปลี่ยนรหัสผ่านจนกว่าจะตั้งรหัสของตัวเอง
+	if (admin.must_change_password === 1 && url.pathname !== "/api/v1/admin/me/password") {
+		return json({ error: "PASSWORD_CHANGE_REQUIRED" }, 403);
+	}
 
 	// ROOT จัดการโครงการอื่นได้ด้วย header X-Project-Code (ไม่ส่ง = โครงการของตัวเอง); ADMIN ใช้ของตัวเองเสมอ
 	let pid = admin.project_id;
