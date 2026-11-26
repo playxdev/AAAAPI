@@ -14,10 +14,14 @@ export interface Decision {
 	credential_ref?: string;
 	// บ้านเลขที่ของเจ้าของ input ส่งเฉพาะ YES (null = Visitor งานส่วนกลาง)
 	house_number?: string | null;
+	// บ้านที่เกี่ยวข้อง (ใช้ผูก access log / รูป กับบ้าน ไม่ส่งให้ SEMA) มีเมื่อรู้ตัวตนแม้ผลเป็น NO
+	house_id?: string | null;
 }
 
 // houseCode = tb_house.house_code ของเจ้าของ credential (null = ไม่มีบ้าน เช่น Visitor งานส่วนกลาง)
-type Identity = { subject: Subject; credentialId?: string; houseCode: string | null; houseNumber: string | null } | { reason: string };
+type Identity =
+	| { subject: Subject; credentialId?: string; houseCode: string | null; houseNumber: string | null; houseId: string | null }
+	| { reason: string; houseId?: string | null };
 
 const YES_REASON: Record<Subject, string> = {
 	RESIDENT: "RESIDENT_ACTIVE",
@@ -62,11 +66,12 @@ export async function decide(env: Env, projectId: string, method: Method, value:
 		method === "ANPR"
 			? await identifyPlate(env.DB, projectId, normalizePlate(value), normalizeProvince(province))
 			: await identifyCredential(env, projectId, method, value);
-	if ("reason" in who) return { decision: "NO", reason_code: who.reason, allowed_methods: [] };
-	if (houseCode !== undefined && who.houseCode !== houseCode) return { decision: "NO", reason_code: "HOUSE_MISMATCH", allowed_methods: [] };
+	if ("reason" in who) return { decision: "NO", reason_code: who.reason, allowed_methods: [], house_id: who.houseId ?? null };
+	if (houseCode !== undefined && who.houseCode !== houseCode)
+		return { decision: "NO", reason_code: "HOUSE_MISMATCH", allowed_methods: [], house_id: who.houseId };
 
 	const allowed = await allowedMethods(env.DB, projectId, who.subject);
-	const base = { subject: who.subject, allowed_methods: allowed, credential_ref: who.credentialId };
+	const base = { subject: who.subject, allowed_methods: allowed, credential_ref: who.credentialId, house_id: who.houseId };
 	if (!allowed.includes(method)) {
 		const reason = who.subject.startsWith("RESIDENT_OVERDUE") ? who.subject : "METHOD_NOT_ALLOWED";
 		return { ...base, decision: "NO", reason_code: reason };
@@ -86,7 +91,7 @@ async function identifyPlate(db: D1Database, projectId: string, plate: string, p
 
 	const { results: residents } = await db
 		.prepare(
-			`SELECT v.province, h.payment_status, h.house_code, h.house_number, h.is_active AS house_active, h.occupancy_status
+			`SELECT v.province, v.house_id, h.payment_status, h.house_code, h.house_number, h.is_active AS house_active, h.occupancy_status
 			 FROM tb_vehicle v JOIN tb_house h ON h.house_id = v.house_id
 			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1`,
 		)
@@ -99,7 +104,7 @@ async function identifyPlate(db: D1Database, projectId: string, plate: string, p
 
 	const visitor = await db
 		.prepare(
-			`SELECT h.house_code, h.house_number FROM tb_visitor v
+			`SELECT v.house_id, h.house_code, h.house_number FROM tb_visitor v
 			 LEFT JOIN tb_house h ON h.house_id = v.house_id
 			 WHERE v.project_id = ? AND v.license_plate = ? AND v.is_active = 1
 			   AND (v.house_id IS NULL OR (h.is_active = 1 AND COALESCE(h.occupancy_status, 'OCCUPIED') <> 'VACANT'))
@@ -107,13 +112,14 @@ async function identifyPlate(db: D1Database, projectId: string, plate: string, p
 			 LIMIT 1`,
 		)
 		.bind(projectId, plate)
-		.first<{ house_code: string | null; house_number: string | null }>();
-	if (visitor) return { subject: "VISITOR", houseCode: visitor.house_code, houseNumber: visitor.house_number };
+		.first<{ house_id: string | null; house_code: string | null; house_number: string | null }>();
+	if (visitor) return { subject: "VISITOR", houseCode: visitor.house_code, houseNumber: visitor.house_number, houseId: visitor.house_id };
 
 	return { reason: "UNKNOWN_PLATE" };
 }
 
 interface HouseRow {
+	house_id: string | null;
 	payment_status: string | null;
 	house_code: string | null;
 	house_number: string | null;
@@ -123,9 +129,9 @@ interface HouseRow {
 
 // บ้านที่ปิดใช้งาน / ไม่มีผู้อยู่อาศัย = ทุกช่องทางของบ้านนั้นใช้ไม่ได้
 function houseIdentity(h: HouseRow, credentialId?: string): Identity {
-	if (h.house_active === 0) return { reason: "USER_INACTIVE" };
-	if (h.occupancy_status === "VACANT") return { reason: "HOUSE_VACANT" };
-	return { subject: residentSubject(h.payment_status), credentialId, houseCode: h.house_code, houseNumber: h.house_number };
+	if (h.house_active === 0) return { reason: "USER_INACTIVE", houseId: h.house_id };
+	if (h.occupancy_status === "VACANT") return { reason: "HOUSE_VACANT", houseId: h.house_id };
+	return { subject: residentSubject(h.payment_status), credentialId, houseCode: h.house_code, houseNumber: h.house_number, houseId: h.house_id };
 }
 
 interface CredentialRow extends HouseRow {
@@ -138,6 +144,7 @@ interface CredentialRow extends HouseRow {
 	started: number;
 	not_expired: number;
 	visitor_valid: number;
+	visitor_house_id: string | null;
 }
 
 const findCredential = async (env: Env, projectId: string, credType: CredType, value: string) =>
@@ -147,7 +154,8 @@ const findCredential = async (env: Env, projectId: string, credType: CredType, v
 		   (c.valid_until IS NULL OR datetime(c.valid_until) >= datetime('now')) AS not_expired,
 		   COALESCE(h.is_active, vh.is_active) AS house_active, h.payment_status, COALESCE(h.house_code, vh.house_code) AS house_code,
 		   COALESCE(h.house_number, vh.house_number) AS house_number, COALESCE(h.occupancy_status, vh.occupancy_status) AS occupancy_status,
-		   (vis.is_active = 1 AND datetime('now') BETWEEN datetime(vis.valid_from) AND datetime(vis.valid_until)) AS visitor_valid
+		   (vis.is_active = 1 AND datetime('now') BETWEEN datetime(vis.valid_from) AND datetime(vis.valid_until)) AS visitor_valid,
+		   vis.house_id AS visitor_house_id
 		 FROM tb_credential c
 		 LEFT JOIN tb_house h ON h.house_id = c.house_id
 		 LEFT JOIN tb_visitor vis ON vis.visitor_id = c.visitor_id
@@ -169,9 +177,9 @@ async function identifyCredential(env: Env, projectId: string, method: Method, v
 	if (c.max_uses !== null && c.use_count >= c.max_uses) return { reason: "CREDENTIAL_USED_UP" };
 
 	if (c.house_id) return houseIdentity(c, c.credential_id);
-	if (c.occupancy_status === "VACANT") return { reason: "HOUSE_VACANT" };
-	if (!c.visitor_valid || c.house_active === 0) return { reason: "VISITOR_NOT_VALID" };
-	return { subject: "VISITOR", credentialId: c.credential_id, houseCode: c.house_code, houseNumber: c.house_number };
+	if (c.occupancy_status === "VACANT") return { reason: "HOUSE_VACANT", houseId: c.visitor_house_id };
+	if (!c.visitor_valid || c.house_active === 0) return { reason: "VISITOR_NOT_VALID", houseId: c.visitor_house_id };
+	return { subject: "VISITOR", credentialId: c.credential_id, houseCode: c.house_code, houseNumber: c.house_number, houseId: c.visitor_house_id };
 }
 
 async function allowedMethods(db: D1Database, projectId: string, subject: Subject): Promise<Method[]> {

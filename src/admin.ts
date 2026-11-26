@@ -10,6 +10,7 @@ import {
 	updateCredential as updateHouseCredential,
 } from "./access";
 import { auditTarget, writeAudit } from "./audit";
+import { isImageKind, readEventImage, signedImageUrl } from "./images";
 import { isThaiProvince, normalizePlate, normalizeProvince, PLATE_RE, type Method } from "./authorize";
 import { hashPassword, JWT_ISS, sha256Hex, signJwt, verifyJwt, verifyPassword } from "./crypto";
 import {
@@ -337,16 +338,36 @@ async function listAccessLogs(c: Ctx) {
 		args.push(v);
 	}
 	const { results } = await c.env.DB.prepare(
-		`SELECT l.log_id, l.timestamp, l.access_type, l.method, l.decision, l.reason_code, l.license_plate, l.house_number,
-		   d.gate_name, cr.cred_type, cr.label AS credential_label
+		`SELECT l.log_id, l.timestamp, l.access_type, l.method, l.decision, l.reason_code, l.license_plate,
+		   COALESCE(l.house_number, h.house_number) AS house_number, l.house_id, h.house_code, d.gate_name, cr.cred_type, cr.label AS credential_label,
+		   l.image_url IS NOT NULL AS has_image, l.plate_image_key IS NOT NULL AS has_plate_image
 		 FROM tb_access_log l
 		 LEFT JOIN tb_device d ON d.device_id = l.device_id
 		 LEFT JOIN tb_credential cr ON cr.credential_id = l.credential_ref
+		 LEFT JOIN tb_house h ON h.house_id = l.house_id
 		 WHERE ${where.join(" AND ")} ORDER BY l.timestamp DESC, l.autoID DESC LIMIT ?`,
 	)
 		.bind(...args, limit)
-		.all();
+		.all<Record<string, unknown>>();
+	// ?signed=1 (CSV ของรายงาน): ลิงก์ดูรูปที่หมดอายุใน 7 วัน เปิดได้โดยไม่ต้อง login
+	if (q.get("signed") === "1") {
+		for (const r of results) {
+			const id = String(r.log_id);
+			if (r.has_image) r.image_link = await signedImageUrl(c.env, c.url.origin, id, "scene");
+			if (r.has_plate_image) r.plate_image_link = await signedImageUrl(c.env, c.url.origin, id, "plate");
+		}
+	}
 	return json({ logs: results });
+}
+
+// รูปของ event (Admin เห็นเฉพาะโครงการตัวเอง) ?kind=scene|plate
+async function accessLogImage(c: Ctx) {
+	const kind = c.url.searchParams.get("kind") ?? "scene";
+	if (!isImageKind(kind)) throw badField("kind");
+	const res = await readEventImage(c.env, c.pid, c.id, kind);
+	// ภาพเป็นข้อมูลส่วนบุคคล (PDPA): บันทึกทุกการดูภาพ
+	if (res.ok) await writeAudit(c.env, c.pid, "ADMIN", c.adminId, "GET /api/v1/admin/access-logs/:id/image", c.id, { kind });
+	return res;
 }
 
 // ---------- Root: โครงการ + Admin ----------
@@ -520,6 +541,7 @@ const ROUTES = [
 	route("POST", "/admins/:id/reset-password", resetAdminPassword),
 	route("POST", "/me/password", changeMyPassword),
 	route("GET", "/access-logs", listAccessLogs),
+	route("GET", "/access-logs/:id/image", accessLogImage),
 	route("GET", "/visitors", adminListVisitors),
 	route("POST", "/visitors", adminCreateVisitor),
 	route("PATCH", "/visitors/:id", adminUpdateVisitor),

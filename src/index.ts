@@ -1,3 +1,4 @@
+import { readSignedImage, uploadEventImage } from "./images";
 import { decide, METHODS, normalizePlate, type Decision, type Method } from "./authorize";
 import { handleAdmin } from "./admin";
 import { HOUSE_CODE_RE } from "./guest";
@@ -124,8 +125,8 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 		await env.DB.prepare(
 			`INSERT INTO tb_access_log
 			   (log_id, project_id, device_id, license_plate, access_type, user_type, is_success, id_status,
-			    method, decision, reason_code, allowed_methods, policy_version, credential_ref, house_number)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			    method, decision, reason_code, allowed_methods, policy_version, credential_ref, house_number, house_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(log_id) DO NOTHING`,
 		)
 			.bind(
@@ -145,6 +146,7 @@ async function authorize(req: Request, env: Env): Promise<Response> {
 				policyVersion,
 				result.credential_ref ?? null,
 				result.house_number ?? null,
+				result.house_id ?? null,
 			)
 			.run();
 	} catch (err) {
@@ -181,9 +183,25 @@ function withCors(req: Request, env: Env, res: Response): Response {
 	return res;
 }
 
+// PUT /api/v1/access/events/:event_id/image?kind=scene|plate (Device JWT)
+async function eventImage(req: Request, env: Env, eventId: string): Promise<Response> {
+	const auth = req.headers.get("Authorization") ?? "";
+	const claims = auth.startsWith("Bearer ") ? await verifyJwt(env.JWT_SECRET, auth.slice(7), JWT_ISS, JWT_AUD) : null;
+	const device = claims && (await getActiveDevice(env, claims.sub));
+	if (!claims || !device || device.project_id !== claims.pid) return json({ error: "UNAUTHORIZED" }, 401);
+	return uploadEventImage(req, env, device.project_id, eventId, new URL(req.url).searchParams.get("kind"));
+}
+
+const EVENT_IMAGE_RE = /^\/api\/v1\/access\/events\/([^/]+)\/image$/;
+const SIGNED_IMAGE_RE = /^\/api\/v1\/images\/([^/]+)\/([^/]+)$/;
+
 async function route(req: Request, env: Env, pathname: string): Promise<Response> {
 	if (req.method === "POST" && pathname === "/api/v1/auth/device/token") return issueDeviceToken(req, env);
 	if (req.method === "POST" && pathname === "/api/v1/access/authorize") return authorize(req, env);
+	const up = req.method === "PUT" && EVENT_IMAGE_RE.exec(pathname);
+	if (up) return eventImage(req, env, decodeURIComponent(up[1]));
+	const signed = req.method === "GET" && SIGNED_IMAGE_RE.exec(pathname);
+	if (signed) return readSignedImage(env, new URL(req.url), decodeURIComponent(signed[1]), signed[2]);
 	if (pathname.startsWith("/api/v1/admin/")) return handleAdmin(req, env);
 	if (pathname.startsWith("/api/v1/owner/")) return handleOwner(req, env);
 	return json({ error: "NOT_FOUND" }, 404);

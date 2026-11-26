@@ -10,6 +10,7 @@ Production: `https://aaa-api.cookievirus.workers.dev`
 ```
 src/index.ts                 routing, CORS, device token, authorize endpoint, access log
 src/authorize.ts             ตัดสินสิทธิ์ (ANPR / credential / Guest Code / policy)
+src/images.ts                รูปจากกล้อง: อัปโหลดจาก SEMA, ดูผ่าน Admin, ลิงก์ที่เซ็นแล้ว (R2 aaa-images)
 src/admin.ts                 Admin API: login, บ้าน + ผู้ติดต่อ, รถ / บัตร / PIN / QR ของบ้าน, Visitor, รหัสผูก LINE
 src/owner.ts                 Owner API (LINE LIFF): login, ผูกบัญชี, ออก / เพิกถอน Guest Code
 src/guest.ts                 ออก Guest Code / Visitor (admin + owner ใช้ร่วมกัน)
@@ -27,6 +28,8 @@ npm install
 npx wrangler login
 npx wrangler secret put JWT_SECRET    # key เซ็น device JWT
 npx wrangler secret put CRED_PEPPER   # key HMAC ของ RFID / QR / PIN (ห้ามเปลี่ยนหลังลงทะเบียน credential แล้ว)
+npx wrangler r2 bucket create aaa-images --location apac   # รูปจากกล้อง (binding IMAGES, private)
+npx wrangler r2 bucket lifecycle add aaa-images expire-90d --expire-days 90   # ลบรูปอายุเกิน 90 วันอัตโนมัติ
 # แก้ vars ใน wrangler.jsonc: ALLOWED_ORIGINS (origin ของ Pages + LIFF), LINE_CHANNEL_ID (LINE Login channel ของ LIFF)
 CLOUDFLARE_ACCOUNT_ID=30ec5dca725dd7acef6a6ef89342e403 npx wrangler d1 migrations apply aaa-d1 --remote
 npm run deploy
@@ -114,6 +117,21 @@ Header `Authorization: Bearer <JWT>`
 `CREDENTIAL_NOT_YET_VALID`, `CREDENTIAL_EXPIRED`, `CREDENTIAL_USED_UP`, `USER_INACTIVE`, `HOUSE_VACANT`, `VISITOR_NOT_VALID`,
 `PLATE_AMBIGUOUS`, `HOUSE_MISMATCH`, `TOO_MANY_ATTEMPTS`, `INTERNAL_ERROR`, `LOG_FAILED`
 
+### `PUT /api/v1/access/events/:event_id/image?kind=scene|plate`
+
+รูปจากกล้อง ณ เวลาที่เกิด event (Device JWT) ส่ง **หลัง** ได้คำตอบ `/access/authorize` แล้ว (ไม่หน่วงไม้กั้น)
+
+```sh
+curl -X PUT "https://aaa-api.cookievirus.workers.dev/api/v1/access/events/<event_id>/image?kind=scene" \
+  -H "Authorization: Bearer <device JWT>" -H "Content-Type: image/jpeg" --data-binary @scene.jpg
+```
+
+- `kind`: `scene` = รูปเต็มฉาก, `plate` = รูปป้ายทะเบียน (close-up) → `201 { event_id, kind }`
+- Body = JPEG ดิบ ≤ 2 MB (เกิน → `413 IMAGE_TOO_LARGE`, type อื่น → `415`, ไม่ใช่ JPEG → `400`)
+- ต้องมี event (`log_id`) ของโครงการเดียวกับอุปกรณ์แล้ว ไม่งั้น `404 EVENT_NOT_FOUND` (SEMA retry ได้); ส่งซ้ำ = แทนที่รูปเดิม
+- เก็บใน R2 `aaa-images` key `<project_id>/<YYYY-MM-DD>/<event_id>-<kind>.jpg` ลบอัตโนมัติ 90 วัน
+- event ผูกกับบ้านที่เกี่ยวข้อง (`tb_access_log.house_id`) ทุกครั้งที่รู้ตัวตน แม้ผลเป็น `NO`
+
 `TOO_MANY_ATTEMPTS`: อุปกรณ์เดียวกันส่ง PIN / QR ที่ไม่รู้จัก (หรือ `HOUSE_MISMATCH`) ครบ 10 ครั้งใน 5 นาที จะปฏิเสธ PIN / QR ของอุปกรณ์นั้นจนพ้นช่วงเวลา
 (กันสุ่ม Guest Code) ANPR และ RFID ยังใช้ได้
 
@@ -145,7 +163,8 @@ Header `Authorization: Bearer <JWT>`
 | `POST` | `/api/v1/admin/houses/:id/credentials` | `{ cred_type: RFID\|QRCODE\|PIN, value?, label?, duration?, valid_from?, valid_until? }` ดู "บัตร / PIN / QR" ด้านล่าง |
 | `PATCH` | `/api/v1/admin/credentials/:id` | `{ label?, duration? \| valid_until? }` แก้ชื่อสั้น / ระยะเวลา (ตัวรหัสแก้ไม่ได้) |
 | `DELETE` | `/api/v1/admin/credentials/:id` | เพิกถอน (`REVOKED`) |
-| `GET` | `/api/v1/admin/access-logs` | การเข้าออกใหม่สุดก่อน `?limit=` (1–1000, ค่าเริ่มต้น 20) `&from=&to=` (UTC) `&decision=YES\|NO\|ERROR&method=` ไม่มีค่า PIN / QR (มีแค่ `credential_label`) |
+| `GET` | `/api/v1/admin/access-logs` | การเข้าออกใหม่สุดก่อน `?limit=` (1–1000, ค่าเริ่มต้น 20) `&from=&to=` (UTC) `&decision=YES\|NO\|ERROR&method=` ไม่มีค่า PIN / QR (มีแค่ `credential_label`); มี `house_id`, `house_code`, `has_image`, `has_plate_image`; `&signed=1` = เพิ่ม `image_link` / `plate_image_link` (ลิงก์ดูรูปหมดอายุใน 7 วัน ไม่ต้อง login ใช้ใน CSV) |
+| `GET` | `/api/v1/admin/access-logs/:id/image` | `?kind=scene\|plate` รูปของ event ในโครงการตัวเอง (`image/jpeg`, `no-store`); ไม่มีรูป → `404 NO_IMAGE`, เกิน 90 วัน → `404 IMAGE_EXPIRED`; ทุกการดูบันทึกใน audit log |
 | `GET` | `/api/v1/admin/visitors` | `?house_id=` / `?valid=1` (เฉพาะที่ยังไม่หมดอายุ) |
 | `POST` | `/api/v1/admin/visitors` | `{ duration, house_id?, full_name?, phone_number?, license_plate?, purpose?, issue_code? }` ไม่ส่ง `house_id` = งานส่วนกลาง, บ้าน `VACANT` → `409 HOUSE_VACANT` |
 | `PATCH` | `/api/v1/admin/visitors/:id` | แก้ชื่อ / โทร / วัตถุประสงค์ / รถ (`license_plate`, `province`, `brand`, `color`) / `is_active` (false = เพิกถอน, true = ใช้ได้อีกครั้งพร้อม Guest Code เดิม) ไม่เปลี่ยนบ้าน อายุ และโค้ด |
@@ -217,6 +236,11 @@ Header `Authorization: Bearer <JWT>`
 - `duration`: `1d` / `7d` / `14d` / `30d` / `1y` / `forever` (100 ปี)
 - DB เก็บแค่ hash: โค้ดจริงคืนให้ **ครั้งเดียว** ตอนสร้าง LIFF ต้องแสดง / แชร์ทันที (เช่น `liff.shareTargetPicker`)
 - เพิกถอนแล้วหรือหมดอายุแล้ว โค้ดเดิมไม่ถูกนำกลับมาใช้ซ้ำ
+
+## ลิงก์ดูรูปที่เซ็นแล้ว
+
+`GET /api/v1/images/:log_id/:kind?exp=&sig=` (สร้างจาก `access-logs?signed=1`) เปิดได้โดยไม่ต้อง login
+`sig` = HMAC-SHA256(`JWT_SECRET`, `img:<log_id>:<kind>:<exp>`) อายุ 7 วัน; หมดอายุ → `403 LINK_EXPIRED`, ลายเซ็นผิด → `403`
 
 ## CORS
 

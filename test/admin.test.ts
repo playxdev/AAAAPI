@@ -252,6 +252,60 @@ describe("house lifecycle", () => {
 	});
 });
 
+describe("event images (R2)", () => {
+	it("device uploads JPEGs for its event; admin views them; signed links expire; the event is linked to the house", async () => {
+		const t = (await login("admin-a")).body.access_token;
+		const hid = (await call("POST", "/api/v1/admin/houses", t, { house_number: "55/5", house_code: "555" })).body.house_id;
+		await call("POST", `/api/v1/admin/houses/${hid}/vehicles`, t, { license_plate: "ขข 5555" });
+		const dev = (await call("POST", "/api/v1/auth/device/token", undefined, { device_id: "DA", device_secret: DEVICE_SECRET })).body.access_token;
+		const eventId = `evt-img-${crypto.randomUUID()}`;
+		await call("POST", "/api/v1/access/authorize", dev, { event_id: eventId, method: "ANPR", value: "ขข5555" });
+
+		const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
+		const put = (body: BodyInit, kind = "scene", id = eventId, type = "image/jpeg", token = dev) =>
+			exports.default.fetch(`https://aaa.test/api/v1/access/events/${id}/image?kind=${kind}`, {
+				method: "PUT",
+				headers: { "Content-Type": type, Authorization: `Bearer ${token}` },
+				body,
+			});
+		expect((await put(jpeg)).status).toBe(201);
+		expect((await put(jpeg, "plate")).status).toBe(201);
+		expect((await put(new Uint8Array([1, 2, 3]))).status).toBe(400); // not a JPEG
+		expect((await put(jpeg, "video")).status).toBe(400);
+		expect((await put(jpeg, "scene", "evt-unknown")).status).toBe(404);
+		expect((await put(jpeg, "scene", eventId, "image/png")).status).toBe(415);
+		expect((await put(new Uint8Array(2 * 1024 * 1024 + 1).fill(0xff))).status).toBe(413);
+		expect((await put(jpeg, "scene", eventId, "image/jpeg", t)).status).toBe(401); // admin token is not a device token
+
+		const log = (await call("GET", "/api/v1/admin/access-logs?limit=1000", t)).body.logs.find((l: any) => l.log_id === eventId);
+		expect(log).toMatchObject({ house_id: hid, house_code: "555", has_image: 1, has_plate_image: 1 });
+
+		const img = await exports.default.fetch(`https://aaa.test/api/v1/admin/access-logs/${eventId}/image?kind=plate`, { headers: { Authorization: `Bearer ${t}` } });
+		expect(img.headers.get("Content-Type")).toBe("image/jpeg");
+		expect(new Uint8Array(await img.arrayBuffer())).toEqual(jpeg);
+		const viewed = await env.DB.prepare("SELECT 1 FROM tb_audit_log WHERE target_id = ? AND action LIKE '%/image'").bind(eventId).first();
+		expect(viewed).not.toBeNull();
+		const other = (await login("admin-b")).body.access_token;
+		expect((await call("GET", `/api/v1/admin/access-logs/${eventId}/image`, other)).status).toBe(404);
+
+		// signed link for the CSV: works without login, refuses a tampered / expired link
+		const signed = (await call("GET", "/api/v1/admin/access-logs?limit=1000&signed=1", t)).body.logs.find((l: any) => l.log_id === eventId);
+		const link = new URL(signed.image_link);
+		expect((await exports.default.fetch(`https://aaa.test${link.pathname}${link.search}`)).status).toBe(200);
+		const bad = new URL(link);
+		bad.searchParams.set("sig", "0".repeat(64));
+		expect((await exports.default.fetch(`https://aaa.test${bad.pathname}${bad.search}`)).status).toBe(403);
+		bad.searchParams.set("exp", "1");
+		const expired = new URL(link);
+		expired.searchParams.set("exp", "1");
+		expect(await (await exports.default.fetch(`https://aaa.test${expired.pathname}${expired.search}`)).json()).toEqual({ error: "LINK_EXPIRED" });
+
+		// after the 90-day lifecycle rule removes the object
+		await env.IMAGES.delete(`${"PA"}/${String(log.timestamp).slice(0, 10)}/${eventId}-scene.jpg`);
+		expect((await call("GET", `/api/v1/admin/access-logs/${eventId}/image`, t)).body.error).toBe("IMAGE_EXPIRED");
+	});
+});
+
 describe("root", () => {
 	it("root (PLAY-0013) manages projects and their admins; admins cannot", async () => {
 		await env.DB.prepare("INSERT INTO tb_admin (admin_id, project_id, admin_name, admin_password, admin_level, ref) VALUES ('ROOT1', 'PRJ-PLAY', 'root', ?, 'ROOT', 'PLAY-0013-R01')")

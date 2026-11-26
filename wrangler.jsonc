@@ -19,7 +19,9 @@
       "database_id": "256177bc-1cb6-449f-b5c6-f5cac2f2b046",
       "migrations_dir": "../AAASQL/migrations"
     }
-  ]
+  ],
+  // รูปจากกล้อง ณ เวลาที่เกิด event (private, Lifecycle Rule ลบอัตโนมัติ 90 วัน) ดู AAASQL migration 0009
+  "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "aaa-images" }]
   // Secrets (ตั้งด้วย `npx wrangler secret put <NAME>` ห้ามใส่ในไฟล์นี้):
   //   JWT_SECRET  - key สำหรับเซ็น device JWT (HS256)
   //   CRED_PEPPER - key สำหรับ HMAC ของ RFID / QR / PIN

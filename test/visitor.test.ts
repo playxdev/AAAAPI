@@ -309,8 +309,9 @@ describe("audit and abuse protection", () => {
 	});
 
 	it("locks keypad/QR on a device after repeated wrong codes", async () => {
-		for (let i = 0; i < 10; i++) await gate("PIN", `9801${String(i).padStart(4, "7")}`);
-		expect(await gate("PIN", "98010000")).toMatchObject({ decision: "NO", reason_code: "TOO_MANY_ATTEMPTS" });
+		// house code 9899 does not exist, so these can never hit a random PIN created by earlier tests
+		for (let i = 0; i < 10; i++) await gate("PIN", `9899${String(i).padStart(4, "7")}`);
+		expect(await gate("PIN", "98990000")).toMatchObject({ decision: "NO", reason_code: "TOO_MANY_ATTEMPTS" });
 		// วิธีอื่นยังใช้ได้
 		expect((await gate("ANPR", "ทท4040")).reason_code).not.toBe("TOO_MANY_ATTEMPTS");
 	});
