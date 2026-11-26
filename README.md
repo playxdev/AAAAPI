@@ -45,11 +45,12 @@ Production: `https://aaa-api.cookievirus.workers.dev` (บัญชี Cookievir
 Secrets `JWT_SECRET` / `CRED_PEPPER` ตั้งแล้วด้วยค่าสุ่ม ไม่มีสำเนาที่อื่น ห้ามเปลี่ยน `CRED_PEPPER` (credential ทั้งหมดจะใช้ไม่ได้)
 
 สถานะ production (2026-11-25, beta):
-- Migration `0001`–`0008` apply แล้ว, policy seed แล้ว (`0008` apply 2026-11-26 bookmark ก่อน apply `00000009-00000000-0000512e-b5d47e4b54db9c6fdc4d22dddccd23c8`; `0007` apply 2026-11-26 bookmark ก่อน apply `00000008-00000000-0000512e-79bb87346a142d79467dc3f23d3f5ab5`; `0006` apply 2026-11-26 bookmark ก่อน apply `00000006-00000000-0000512e-973be42f89af91dde1fb5e13e5b5897f`; Time Travel bookmark ก่อน apply
+- Migration `0001`–`0009` apply แล้ว, policy seed แล้ว (`0009` apply 2026-11-26 bookmark ก่อน apply `0000000a-00000002-0000512f-99dbbaf45fad7f23f61a94afca5b8e0b`; `0008` apply 2026-11-26 bookmark ก่อน apply `00000009-00000000-0000512e-b5d47e4b54db9c6fdc4d22dddccd23c8`; `0007` apply 2026-11-26 bookmark ก่อน apply `00000008-00000000-0000512e-79bb87346a142d79467dc3f23d3f5ab5`; `0006` apply 2026-11-26 bookmark ก่อน apply `00000006-00000000-0000512e-973be42f89af91dde1fb5e13e5b5897f`; Time Travel bookmark ก่อน apply
   `0004` = สิทธิ์เข้าออกเป็นของบ้าน: `00000002-00000000-0000512e-1d3fb267a62c19c8230ce52ff558934c`,
   `0005` = รหัสโครงการ: `00000003-00000000-0000512e-4eeff727b4aa67764011d2ed1af98f5f`)
 - Device ทดสอบของ SEMA: `SEMA-000-01` (`PRJ-000`, ทางเข้า)
 - โครงการ `PRJ-000` รหัสโครงการ `PROJ-0001` (หมู่บ้านทดสอบ) + admin `admin` (`ADM-001`)
+- R2 `aaa-images` (APAC, private) + Lifecycle Rule `expire-90d` สร้างแล้ว 2026-11-26
 - Root: โครงการ `PRJ-PLAY` รหัส `PLAY-0013` (PlayDevX) + `root` (`ADM-ROOT`, ref `PLAY-0013-R01`) จัดการทุกโครงการ
 - ล้างข้อมูลทดสอบแล้ว 2026-11-12 (เหลือโครงการ, admin, policy) ข้อมูลยังเป็น beta ล้างได้
 - `ALLOWED_ORIGINS` = `https://aaa-admin.pages.dev` (Admin WebApp, ตรงกันทั้งตัว URL preview ของ Pages ใช้ไม่ได้)
